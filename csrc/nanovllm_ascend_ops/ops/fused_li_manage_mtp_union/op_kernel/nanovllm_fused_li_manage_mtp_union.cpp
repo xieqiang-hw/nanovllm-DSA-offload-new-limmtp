@@ -112,11 +112,13 @@ private:
         for(uint32_t r=0;r<ROUTES;++r) {
             LocalTensor<float> dst=(r==0?s0:(r==1?s1:(r==2?s2:s3)));
             DataCopyPad(dst,scoresGm[(static_cast<uint64_t>(b)*ROUTES+r)*sourceCapacity+start],
-                        AscendC::DataCopyExtParams{1,valid*sizeof(float),0,0,0},
+                        AscendC::DataCopyExtParams{
+                            1,static_cast<uint32_t>(valid*sizeof(float)),0,0,0},
                         AscendC::DataCopyPadExtParams<float>{true,0,static_cast<uint8_t>((8U-valid%8U)%8U),0.0f});
         }
         DataCopyPad(cache,cacheSlotsGm[static_cast<uint64_t>(row)*sourceCapacity+start],
-                    AscendC::DataCopyExtParams{1,valid*sizeof(int32_t),0,0,0},
+                    AscendC::DataCopyExtParams{
+                        1,static_cast<uint32_t>(valid*sizeof(int32_t)),0,0,0},
                     AscendC::DataCopyPadExtParams<int32_t>{false,0,0,0});
         Sync<HardEvent::MTE2_V>(HardEvent::MTE2_V);
         Adds(key,s0,-thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES),valid); PipeBarrier<PIPE_V>();
@@ -132,7 +134,7 @@ private:
         Select(key,mask,invalid,key,SELMODE::VSEL_TENSOR_TENSOR_MODE,valid); PipeBarrier<PIPE_V>();
         CompareScalar(mask,cache,-1,CMPMODE::EQ,valid); PipeBarrier<PIPE_V>();
         Select(key,mask,invalid,key,SELMODE::VSEL_TENSOR_TENSOR_MODE,valid); PipeBarrier<PIPE_V>();
-        ArithProgression(payload,start,1,CHUNK); PipeBarrier<PIPE_V>();
+        ArithProgression<uint32_t>(payload,start,1U,CHUNK); PipeBarrier<PIPE_V>();
         if(valid<CHUNK) { Duplicate(key.ReinterpretCast<int32_t>()[valid],NEG_INF_BITS,CHUNK-valid); PipeBarrier<PIPE_V>(); }
         SortChunk(chunkPair,key,payload,sortTmp);
     }
