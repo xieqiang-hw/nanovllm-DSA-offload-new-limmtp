@@ -7,6 +7,7 @@
 #include "lib/matmul_intf.h"
 #include "fused_li_manage_mtp_template_tiling_key.h"
 #include "lightning_indexer_kernel.h"
+#include "fused_li_manage_mtp_union.h"
 
 using namespace LIKernel;
 
@@ -22,6 +23,17 @@ using namespace LIKernel;
                 topkIndex, topkSlots, missSrcIds, missDstSlots,                                                       \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
+        if ASCEND_IS_AIV {                                                                                            \
+            /* Publish all four route TopKs before computing each request union. */                                  \
+            SyncAll();                                                                                                 \
+            if ((GetBlockIdx() & 1U) == 0U) {                                                                         \
+                tPipe.Reset();                                                                                         \
+                MtpUnion::MtpMissUnion unionOp;                                                                        \
+                unionOp.Init(missSrcIds, missDstSlots, topkSlots, actualSeqLengths,                                  \
+                             missSrcIds, missCount, tiling_data->bSize, &tPipe);                                      \
+                unionOp.Process(GetBlockIdx() / 2U, GetBlockNum());                                                    \
+            }                                                                                                          \
+        }                                                                                                              \
     } while (0)
 
 template <int DT>
@@ -38,7 +50,6 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__CCE_AICORE__ == 200)
 #else
     TPipe tPipe;
-    (void)missCount;
     (void)cacheSlotsOut;
     (void)cacheTokens;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);

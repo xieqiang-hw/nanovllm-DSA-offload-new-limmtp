@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON:-python}"
 RAW_SOC_VERSION="${SOC_VERSION:-ascend910_9391}"
 ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
-CUSTOM_OPS="fused_li_manage;fused_li_manage_mtp;fused_li_manage_mtp_union"
+CUSTOM_OPS="fused_li_manage;fused_li_manage_mtp"
 NANOVLLM_EXT_BUILD_JOBS="${NANOVLLM_EXT_BUILD_JOBS:-1}"
 
 case "${RAW_SOC_VERSION}" in
@@ -100,4 +100,4 @@ ls -lh "${ROOT_DIR}/nanovllm"/_C*.so
 
 ln -s ${ROOT_DIR}/nanovllm/_cann_ops_custom/vendors/nanovllm-ascend/op_api/lib/libcust_opapi.so ${ROOT_DIR}/nanovllm/_cann_ops_custom/vendors/nanovllm-ascend/op_api/lib/libopapi.so
 
-echo "[nanovllm ops] built fused_li_manage, fused_li_manage_mtp, and its internal union kernel"
+echo "[nanovllm ops] built fused_li_manage and fused_li_manage_mtp"
