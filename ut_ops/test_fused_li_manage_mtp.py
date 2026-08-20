@@ -207,15 +207,26 @@ def run_graph_check(case: dict[str, torch.Tensor], replays: int) -> None:
                                         device=case["query"].device))
         graph.replay()
         torch.npu.synchronize()
-        captured = [case[name].clone() for name in
-                    ("topk_src", "topk_dst", "miss_src", "miss_dst", "miss_counts")]
+        captured = {name: case[name].clone() for name in
+                    ("topk_src", "topk_dst", "miss_src", "miss_dst", "miss_counts")}
         call_mtp(case)
         torch.npu.synchronize()
-        eager = [case[name] for name in
-                 ("topk_src", "topk_dst", "miss_src", "miss_dst", "miss_counts")]
-        if any(not torch.equal(lhs, rhs) for lhs, rhs in zip(captured, eager)):
+        mismatches = []
+        for name in ("topk_src", "topk_dst", "miss_counts"):
+            if not torch.equal(captured[name], case[name]):
+                mismatches.append(name)
+        captured_counts = captured["miss_counts"].cpu().tolist()
+        eager_counts = case["miss_counts"].cpu().tolist()
+        if captured_counts == eager_counts:
+            for request, count in enumerate(captured_counts):
+                for name in ("miss_src", "miss_dst"):
+                    if not torch.equal(captured[name][request, :count],
+                                       case[name][request, :count]):
+                        mismatches.append(f"{name}[{request},:{count}]")
+        if mismatches:
             raise AssertionError(
-                f"ACLGraph replay outputs differ from eager outputs at replay={replay}")
+                f"ACLGraph replay outputs differ from eager outputs at replay={replay}: "
+                f"fields={mismatches}")
     print(f"FUSED_LI_MANAGE_MTP_GRAPH_CHECK replays={replays} dynamic_query=1 ok=1",
           flush=True)
 
