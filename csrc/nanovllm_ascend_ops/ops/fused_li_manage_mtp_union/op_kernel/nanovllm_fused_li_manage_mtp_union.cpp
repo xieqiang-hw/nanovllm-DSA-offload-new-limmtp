@@ -205,6 +205,9 @@ private:
                 int32_t candidateSlot=(candidateSrc>=0&&static_cast<uint32_t>(candidateSrc)<actual)?
                     cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+candidateSrc):-1;
                 if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
+                // Thresholds provide the vector fast filter.  Keep one final
+                // exact guard for threshold ties/rounding at the TopK edge.
+                if(IsProtectedTopk(b,candidateSrc)) continue;
                 src=candidateSrc; slot=candidateSlot; break;
             }
             // BuildEvictChunk already applies all four strict TopK thresholds.
@@ -220,14 +223,9 @@ private:
                         static_cast<uint64_t>(row)*sourceCapacity+candidate);
                     if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
                     if(IsProtectedTopk(b,static_cast<int32_t>(candidate))) continue;
-                    bool duplicate=false;
-                    for(uint32_t prev=0;prev<i;++prev) {
-                        if(result.GetValue(prev)==static_cast<int32_t>(candidate)||
-                           result.GetValue(CAPACITY+prev)==candidateSlot) {
-                            duplicate=true; break;
-                        }
-                    }
-                    if(duplicate) continue;
+                    // fallbackCursor advances monotonically, so source IDs do
+                    // not repeat. cache_slots_pool is a one-to-one persistent
+                    // mapping, therefore its valid logical slots do not repeat.
                     src=static_cast<int32_t>(candidate); slot=candidateSlot; break;
                 }
             }
