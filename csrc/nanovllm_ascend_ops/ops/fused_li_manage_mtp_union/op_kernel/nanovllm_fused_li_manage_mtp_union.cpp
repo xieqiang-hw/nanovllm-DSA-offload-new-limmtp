@@ -74,10 +74,8 @@ private:
         if(total!=0U) {
             LocalTensor<uint32_t> ids=input.ReinterpretCast<uint32_t>();
             LocalTensor<int32_t> offsets=ids[CAPACITY].ReinterpretCast<int32_t>();
-            LocalTensor<float> idsFloat=merged;
-            LocalTensor<float> shifted=merged[CAPACITY];
-            LocalTensor<float> compactFloat=input;
-            LocalTensor<int32_t> compactInt=input[CAPACITY].ReinterpretCast<int32_t>();
+            LocalTensor<uint32_t> compact=merged.ReinterpretCast<uint32_t>();
+            LocalTensor<uint32_t> shifted=compact[CAPACITY];
             LocalTensor<uint8_t> uniqueMask=slots.ReinterpretCast<uint8_t>();
             LocalTensor<uint32_t> mergedBits=merged.ReinterpretCast<uint32_t>();
 
@@ -105,9 +103,6 @@ private:
             Adds(ids.ReinterpretCast<int32_t>(),ids.ReinterpretCast<int32_t>(),
                  static_cast<int32_t>(indexMask+MISS_KEY_BASE_BITS),total);
             PipeBarrier<PIPE_V>();
-            Cast(idsFloat,ids.ReinterpretCast<int32_t>(),RoundMode::CAST_NONE,total);
-            Sync<HardEvent::V_S>(HardEvent::V_S);
-            countLocal.SetValue(0,ids.ReinterpretCast<int32_t>().GetValue(0));
 
             uint32_t remaining=total-1U;
             uint64_t kept=0U;
@@ -118,29 +113,27 @@ private:
                 PipeBarrier<PIPE_V>();
                 Adds(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),remaining);
                 PipeBarrier<PIPE_V>();
-                Gather(shifted,idsFloat,offsets.ReinterpretCast<uint32_t>(),0U,remaining);
+                Gather(shifted,ids,offsets.ReinterpretCast<uint32_t>(),0U,remaining);
                 PipeBarrier<PIPE_V>();
                 Duplicate(uniqueMask.ReinterpretCast<uint32_t>(),0U,(remaining+31U)/32U);
                 PipeBarrier<PIPE_V>();
-                Compare(uniqueMask,shifted,idsFloat,CMPMODE::NE,remaining);
+                Compare(uniqueMask,shifted,ids,CMPMODE::NE,remaining);
                 PipeBarrier<PIPE_V>();
                 GatherMaskParams uniqueParams;
                 uniqueParams.src0BlockStride=1;
                 uniqueParams.repeatTimes=1;
                 uniqueParams.src0RepeatStride=8;
                 uniqueParams.src1RepeatStride=0;
-                GatherMask(compactFloat,shifted,uniqueMask.ReinterpretCast<uint32_t>(),
+                GatherMask(compact,shifted,uniqueMask.ReinterpretCast<uint32_t>(),
                            true,remaining,uniqueParams,kept);
                 Sync<HardEvent::V_S>(HardEvent::V_S);
-                Cast(compactInt,compactFloat,RoundMode::CAST_RINT,static_cast<uint32_t>(kept));
-                PipeBarrier<PIPE_V>();
             }
             count=1U+static_cast<uint32_t>(kept);
             Sync<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-            DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],countLocal,
+            DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],ids.ReinterpretCast<int32_t>(),
                         {1,static_cast<uint16_t>(sizeof(int32_t)),0,0});
             if(kept!=0U) {
-                DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+1U],compactInt,
+                DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+1U],compact.ReinterpretCast<int32_t>(),
                             {1,static_cast<uint16_t>(kept*sizeof(int32_t)),0,0});
             }
             Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
