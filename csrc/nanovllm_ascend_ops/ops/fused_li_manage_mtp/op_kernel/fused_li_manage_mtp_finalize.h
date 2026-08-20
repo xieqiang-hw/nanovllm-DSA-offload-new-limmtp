@@ -1,8 +1,8 @@
+#ifndef FUSED_LI_MANAGE_MTP_FINALIZE_H
+#define FUSED_LI_MANAGE_MTP_FINALIZE_H
 #include "kernel_operator.h"
-#include "kernel_operator_list_tensor_intf.h"
-#include "fused_li_manage_mtp_union_tiling.h"
 using namespace AscendC;
-namespace {
+namespace MtpFinalize {
 constexpr uint32_t ROUTES=4U, TOPK=2048U, PAIR_WORDS=4096U, CAPACITY=8192U, CHUNK=512U;
 constexpr uint32_t SORT_REPEATS=CHUNK/32U, ACC_PAIR_FLOATS=CAPACITY*2U;
 constexpr uint32_t MERGE_PAIR_FLOATS=(CAPACITY+CHUNK)*2U;
@@ -41,7 +41,7 @@ public:
                                 GM_ADDR scores,GM_ADDR thresholds,GM_ADDR cacheSlots,
                                 GM_ADDR reqEntries,GM_ADDR cacheTokens,GM_ADDR topkSrc,
                                 GM_ADDR out,GM_ADDR missDst,GM_ADDR evictSrc,GM_ADDR counts,
-                                const optiling::FusedLiManageMtpUnionTilingData *t, TPipe *pipe) {
+                                uint32_t batch,uint32_t capacity,TPipe *pipe) {
         pair0Gm.SetGlobalBuffer((__gm__ float*)p0); pair1Gm.SetGlobalBuffer((__gm__ float*)p1);
         slotsGm.SetGlobalBuffer((__gm__ int32_t*)slots); candidatesGm.SetGlobalBuffer((__gm__ int32_t*)candidates);
         scoresGm.SetGlobalBuffer((__gm__ float*)scores); thresholdsGm.SetGlobalBuffer((__gm__ float*)thresholds);
@@ -50,15 +50,17 @@ public:
         cacheTokensGm.SetGlobalBuffer((__gm__ int32_t*)cacheTokens);
         topkSrcGm.SetGlobalBuffer((__gm__ int32_t*)topkSrc);
         outGm.SetGlobalBuffer((__gm__ int32_t*)out); missDstGm.SetGlobalBuffer((__gm__ int32_t*)missDst);
-        evictSrcGm.SetGlobalBuffer((__gm__ int32_t*)evictSrc); countsGm.SetGlobalBuffer((__gm__ int32_t*)counts);
-        batchSize=t->batchSize; sourceCapacity=t->sourceCapacity;
+        writeEvictSrc=evictSrc!=nullptr;
+        if(writeEvictSrc) evictSrcGm.SetGlobalBuffer((__gm__ int32_t*)evictSrc);
+        countsGm.SetGlobalBuffer((__gm__ int32_t*)counts);
+        batchSize=batch; sourceCapacity=capacity;
         pipe->InitBuffer(pairInBuf,MERGE_PAIR_FLOATS*sizeof(float));
         pipe->InitBuffer(pairOutBuf,MERGE_PAIR_FLOATS*sizeof(float));
         pipe->InitBuffer(workBuf,7168U*sizeof(float));
         pipe->InitBuffer(countBuf,32U);
     }
-    __aicore__ inline void Process() {
-        for(uint32_t b=GetBlockIdx();b<batchSize;b+=GetBlockNum()) ProcessBatch(b);
+    __aicore__ inline void Process(uint32_t first,uint32_t stride) {
+        for(uint32_t b=first;b<batchSize;b+=stride) ProcessBatch(b);
     }
 private:
     __aicore__ inline uint32_t BuildUnion(uint32_t b, LocalTensor<float> input,
@@ -227,8 +229,8 @@ private:
             result.SetValue(i,src); result.SetValue(CAPACITY+i,slot);
         }
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-        DataCopyPad(evictSrcGm[static_cast<uint64_t>(b)*CAPACITY],result,
-                    {1,static_cast<uint16_t>(count*sizeof(int32_t)),0,0});
+        if(writeEvictSrc) DataCopyPad(evictSrcGm[static_cast<uint64_t>(b)*CAPACITY],result,
+                                     {1,static_cast<uint16_t>(count*sizeof(int32_t)),0,0});
         DataCopyPad(missDstGm[static_cast<uint64_t>(b)*CAPACITY],result[CAPACITY],
                     {1,static_cast<uint16_t>(count*sizeof(int32_t)),0,0});
         Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
@@ -259,19 +261,10 @@ private:
     GlobalTensor<int32_t> outGm,missDstGm,evictSrcGm,countsGm;
     TBuf<TPosition::VECCALC> pairInBuf,pairOutBuf,workBuf,countBuf;
     uint32_t batchSize=0U,sourceCapacity=0U;
+    bool writeEvictSrc=false;
     uint32_t missLen[ROUTES]={0U,0U,0U,0U};
     float routeThreshold[ROUTES]={0.0F,0.0F,0.0F,0.0F};
 };
 }
-extern "C" __global__ __aicore__ void nanovllm_fused_li_manage_mtp_union(
-    GM_ADDR pair0,GM_ADDR pair1,GM_ADDR slots,GM_ADDR candidates,
-    GM_ADDR scores,GM_ADDR thresholds,GM_ADDR cacheSlots,GM_ADDR reqEntries,
-    GM_ADDR cacheTokens,GM_ADDR topkSrc,GM_ADDR out,GM_ADDR missDst,
-    GM_ADDR evictSrc,GM_ADDR counts,GM_ADDR workspace,GM_ADDR tiling) {
-    (void)workspace; KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-    GET_TILING_DATA_WITH_STRUCT(optiling::FusedLiManageMtpUnionTilingData,data,tiling);
-    TPipe pipe; MtpMissUnion op;
-    op.Init(pair0,pair1,slots,candidates,scores,thresholds,cacheSlots,reqEntries,
-            cacheTokens,topkSrc,out,missDst,evictSrc,counts,&data,&pipe);
-    op.Process();
-}
+
+#endif

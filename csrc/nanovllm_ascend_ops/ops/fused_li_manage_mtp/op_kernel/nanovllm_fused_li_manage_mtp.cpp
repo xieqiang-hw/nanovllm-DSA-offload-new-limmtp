@@ -7,6 +7,7 @@
 #include "lib/matmul_intf.h"
 #include "fused_li_manage_mtp_template_tiling_key.h"
 #include "lightning_indexer_kernel.h"
+#include "fused_li_manage_mtp_finalize.h"
 
 using namespace LIKernel;
 
@@ -22,6 +23,19 @@ using namespace LIKernel;
                 topkIndex, topkSlots, missSrcIds, missDstSlots, scoreScratch, thresholdScratch,                       \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
+        if ASCEND_IS_AIV {                                                                                            \
+            /* All four route TopKs must be globally visible before request finalize. */                              \
+            SyncAll();                                                                                                 \
+            if ((GetBlockIdx() & 1U) == 0U) {                                                                         \
+                tPipe.Reset();                                                                                         \
+                MtpFinalize::MtpMissUnion finalize;                                                                    \
+                finalize.Init(missSrcIds, missDstSlots, topkSlots, actualSeqLengths, scoreScratch,                    \
+                              thresholdScratch, cacheSlots, reqPoolEntries, cacheTokens, topkIndex,                   \
+                              missSrcIds, missDstSlots, nullptr, missCount,                                             \
+                              tiling_data->bSize, tiling_data->cacheSlotsSize, &tPipe);                                \
+                finalize.Process(GetBlockIdx() / 2U, GetBlockNum());                                                   \
+            }                                                                                                          \
+        }                                                                                                              \
     } while (0)
 
 template <int DT>
@@ -39,9 +53,7 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__CCE_AICORE__ == 200)
 #else
     TPipe tPipe;
-    (void)missCount;
     (void)cacheSlotsOut;
-    (void)cacheTokens;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     if constexpr (DT == LI_MTP_TPL_FP16) {
