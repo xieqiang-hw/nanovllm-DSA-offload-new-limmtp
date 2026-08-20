@@ -130,10 +130,10 @@ private:
             }
             count=1U+static_cast<uint32_t>(kept);
             Sync<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-            DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],ids.ReinterpretCast<int32_t>(),
+            DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],ids,
                         {1,static_cast<uint16_t>(sizeof(int32_t)),0,0});
             if(kept!=0U) {
-                DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+1U],compact.ReinterpretCast<int32_t>(),
+                DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+1U],compact,
                             {1,static_cast<uint16_t>(kept*sizeof(int32_t)),0,0});
             }
             Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
