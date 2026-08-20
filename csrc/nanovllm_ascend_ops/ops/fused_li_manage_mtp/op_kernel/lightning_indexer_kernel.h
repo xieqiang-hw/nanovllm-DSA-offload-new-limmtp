@@ -58,7 +58,6 @@ public:
                                 __gm__ uint8_t *reqPoolEntries, __gm__ uint8_t *cacheSlots,
                                 __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                 __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
-                                __gm__ uint8_t *missSrcIds, __gm__ uint8_t *missCount,
                                 __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling, TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -108,8 +107,6 @@ protected:
     GlobalTensor<int32_t> reqPoolEntriesGm;
     GlobalTensor<int32_t> cacheSlotsGm;
     GlobalTensor<int32_t> slotOutGm;
-    GlobalTensor<int32_t> missSrcIdsGm;
-    GlobalTensor<int32_t> missCountGm;
     GlobalTensor<int32_t> blockTableGm;
 
     GlobalTensor<uint32_t> actualSeqLengthsGmQ;
@@ -386,7 +383,6 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
                                             __gm__ uint8_t *reqPoolEntries, __gm__ uint8_t *cacheSlots,
                                             __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                             __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
-                                            __gm__ uint8_t *missSrcIds, __gm__ uint8_t *missCount,
                                             __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling,
                                             TPipe *tPipe)
 {
@@ -433,11 +429,9 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
         reqPoolEntriesGm.SetGlobalBuffer((__gm__ int32_t *)reqPoolEntries);
         cacheSlotsGm.SetGlobalBuffer((__gm__ int32_t *)cacheSlots);
         slotOutGm.SetGlobalBuffer((__gm__ int32_t *)sparseValues);
-        missSrcIdsGm.SetGlobalBuffer((__gm__ int32_t *)missSrcIds);
-        missCountGm.SetGlobalBuffer((__gm__ int32_t *)missCount);
         weightsGm.SetGlobalBuffer((__gm__ K_T *)weights);
         vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, vec1ParamGm, weightsGm, indiceOutGm, valueOutGm,
-                                           reqPoolEntriesGm, cacheSlotsGm, slotOutGm, missSrcIdsGm, missCountGm);
+                                           reqPoolEntriesGm, cacheSlotsGm, slotOutGm);
     } else {
         matmulService.InitParams(constInfo);
         queryGm.SetGlobalBuffer((__gm__ Q_T *)query);
@@ -678,12 +672,6 @@ __aicore__ inline void LIPreload<LIT>::ProcessDecode()
         if (splitCoreInfo.isLD) {
             vectorService.ProcessLD();
         }
-        SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
-        SyncAll();
-        bool isRequestOwner = (tmpBlockIdx % 2U == 0U) &&
-                              splitCoreInfo.gS1Start == 0U && splitCoreInfo.s2Start == 0U;
-        vectorService.ProcessMissUnion(splitCoreInfo.bN2Start / constInfo.kHeadNum,
-                                       isRequestOwner);
     }
 }
 } // namespace LIKernel
