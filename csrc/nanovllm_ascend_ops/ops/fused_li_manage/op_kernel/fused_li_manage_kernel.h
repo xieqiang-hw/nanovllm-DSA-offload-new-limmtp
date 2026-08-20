@@ -193,8 +193,10 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
     scoresGm.SetGlobalBuffer((__gm__ float *)(workspace + scoresOffset));
     uint64_t scoreStride = CeilDiv(static_cast<uint64_t>(constInfo.kSeqSize),
                                    static_cast<uint64_t>(constInfo.s2BaseSize)) * constInfo.s2BaseSize;
-    uint64_t partialTopkOffset =
-        scoresOffset + constInfo.batchSize * scoreStride * sizeof(float);
+    uint64_t scoreWorkspaceBytes = topkOnly
+        ? 0U
+        : constInfo.batchSize * scoreStride * sizeof(float);
+    uint64_t partialTopkOffset = scoresOffset + scoreWorkspaceBytes;
     partialTopkGm.SetGlobalBuffer((__gm__ float *)(workspace + partialTopkOffset));
     uint64_t partialMetaOffset =
         partialTopkOffset + static_cast<uint64_t>(tiling->usedCoreNum) *

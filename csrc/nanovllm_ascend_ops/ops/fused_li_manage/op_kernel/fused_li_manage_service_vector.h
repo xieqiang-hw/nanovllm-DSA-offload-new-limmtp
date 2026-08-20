@@ -279,6 +279,11 @@ template <typename LIT>
 __aicore__ inline void LIVector<LIT>::StartPayloadCopy(LocalTensor<int32_t> &payloadLocal, uint32_t cacheRowIdx,
                                                        int32_t s2BaseIdx, int32_t validLen, int32_t alignedLen)
 {
+    if (topkOnly_) {
+        Duplicate(payloadLocal, LICommon::ConstInfo::INVALID_IDX, alignedLen);
+        PipeBarrier<PIPE_V>();
+        return;
+    }
     if (validLen < alignedLen) {
         Duplicate(payloadLocal, LICommon::ConstInfo::INVALID_IDX, alignedLen);
         PipeBarrier<PIPE_V>();
@@ -294,7 +299,9 @@ template <typename LIT>
 __aicore__ inline void LIVector<LIT>::FinishPayload(LocalTensor<int32_t> &payloadLocal, int32_t s2BaseIdx,
                                                     int32_t validLen)
 {
-    SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    if (!topkOnly_) {
+        SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    }
     // The packed TopK payload has one invalid-slot representation. Normalize
     // both -65536 and the 1-based free-slot bindings (-s) to that internal
     Maxs(payloadLocal, payloadLocal, LICommon::ConstInfo::INVALID_IDX,
@@ -840,7 +847,9 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
     PipeBarrier<PIPE_V>();
     bool hasLongIndexTag = info.actS2Size > EXACT_PACKED_SOURCE_TOKENS;
     PrepareSortScore(sortScoreUb, reduceOutInner, cuBaseS2Idx, cuS2Len, hasLongIndexTag);
-    WriteScoreChunk(info.bIdx, cuBaseS2Idx, sortScoreUb, s2BaseSize_);
+    if (!topkOnly_) {
+        WriteScoreChunk(info.bIdx, cuBaseS2Idx, sortScoreUb, s2BaseSize_);
+    }
     FinishPayload(payloadUb, cuBaseS2Idx, cuS2Len);
     LocalTensor<float> tmpSortBuf = outQueue_.AllocTensor<float>();
     uint32_t cachedChunkIdx = info.segmentChunkIdx % PAYLOAD_BUF_SLOTS;

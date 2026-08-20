@@ -297,7 +297,9 @@ ge::graphStatus FusedLiManageTiling::DoTiling(FusedLiManageTilingInfo *tilingInf
     workspaceSize += M_BASE_SIZE * S2_BASE_SIZE * MM1_RES_ELEM_SIZE * DOUBLE_BUFFER * blockDim;
     uint64_t scoreStride = ((static_cast<uint64_t>(tilingInfo->s2Size) + S2_BASE_SIZE - 1) / S2_BASE_SIZE) *
                            S2_BASE_SIZE;
-    workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * scoreStride * sizeof(float);
+    if (!mtp_) {
+        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * scoreStride * sizeof(float);
+    }
     constexpr uint32_t PARTIAL_SLOTS_PER_CORE = 2;
     constexpr uint32_t PARTIAL_META_INTS_PER_CORE = 8;
     constexpr uint32_t TOPK_PAIR_ELEMS = DECODE_SPARSE_COUNT * 2;
