@@ -24,9 +24,9 @@ public:
         countsGm.SetGlobalBuffer((__gm__ int32_t *)counts);
         batchSize = tiling->batchSize;
         pipe->InitBuffer(idsBuf, CAPACITY * sizeof(int32_t));
-        pipe->InitBuffer(keysBuf, CAPACITY * sizeof(float));
-        pipe->InitBuffer(pair0Buf, CAPACITY * 2U * sizeof(float));
-        pipe->InitBuffer(pair1Buf, CAPACITY * 2U * sizeof(float));
+        pipe->InitBuffer(outBuf, CAPACITY * sizeof(int32_t));
+        pipe->InitBuffer(slotsBuf, TOPK * sizeof(int32_t));
+        pipe->InitBuffer(countBuf, 32U);
     }
     __aicore__ inline void Process()
     {
@@ -36,15 +36,11 @@ private:
     __aicore__ inline void ProcessBatch(uint32_t b)
     {
         LocalTensor<int32_t> ids = idsBuf.Get<int32_t>();
-        LocalTensor<int32_t> ids = idsBuf.Get<int32_t>();
-        LocalTensor<float> keys = keysBuf.Get<float>();
-        LocalTensor<int32_t> slots = keys.template ReinterpretCast<int32_t>();
-        LocalTensor<float> pair0 = pair0Buf.Get<float>();
-        LocalTensor<float> pair1 = pair1Buf.Get<float>();
+        LocalTensor<int32_t> result = outBuf.Get<int32_t>();
+        LocalTensor<int32_t> slots = slotsBuf.Get<int32_t>();
+        LocalTensor<int32_t> countLocal = countBuf.Get<int32_t>();
         uint32_t lengths[ROUTES] = {0U, 0U, 0U, 0U};
-        Duplicate(ids, -1, CAPACITY);
-        Duplicate(keys, -3.402823466e+38F, CAPACITY);
-        PipeBarrier<PIPE_V>();
+        uint32_t positions[ROUTES] = {0U, 0U, 0U, 0U};
         for (uint32_t r = 0; r < ROUTES; ++r) {
             uint64_t base = (static_cast<uint64_t>(b) * ROUTES + r) * TOPK;
             DataCopy(slots, slotsGm[base], TOPK);
@@ -57,75 +53,39 @@ private:
             }
         }
         SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+        uint32_t count = 0U;
+        int32_t last = -1;
+        int32_t heads[ROUTES] = {INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX};
         for (uint32_t r = 0; r < ROUTES; ++r) {
-            if (lengths[r] != 0U) {
-                Cast(keys[r * TOPK], ids[r * TOPK], RoundMode::CAST_NONE, lengths[r]);
-                PipeBarrier<PIPE_V>();
-                Muls(keys[r * TOPK], keys[r * TOPK], -1.0F, lengths[r]);
-                PipeBarrier<PIPE_V>();
+            if (lengths[r] != 0U) heads[r] = ids.GetValue(r * TOPK);
+        }
+        while (positions[0] < lengths[0] || positions[1] < lengths[1] ||
+               positions[2] < lengths[2] || positions[3] < lengths[3]) {
+            int32_t next = INT32_MAX;
+            for (uint32_t r = 0; r < ROUTES; ++r) {
+                next = heads[r] < next ? heads[r] : next;
+            }
+            if (next != last) { result.SetValue(count++, next); last = next; }
+            for (uint32_t r = 0; r < ROUTES; ++r) {
+                if (heads[r] == next) {
+                    ++positions[r];
+                    heads[r] = positions[r] < lengths[r]
+                        ? ids.GetValue(r * TOPK + positions[r]) : INT32_MAX;
+                }
             }
         }
-
-        Sort32(pair0, keys, ids.template ReinterpretCast<uint32_t>(), CAPACITY / 32U);
-        PipeBarrier<PIPE_V>();
-        uint32_t groups = CAPACITY / 32U;
-        uint32_t elements = 32U;
-        LocalTensor<float> src = pair0;
-        LocalTensor<float> dst = pair1;
-        while (groups > 1U) {
-            MrgSort4Info params;
-            params.elementLengths[0] = elements;
-            params.elementLengths[1] = elements;
-            params.elementLengths[2] = elements;
-            params.elementLengths[3] = elements;
-            params.ifExhaustedSuspension = false;
-            params.validBit = 0b1111;
-            params.repeatTimes = groups / 4U;
-            MrgSortSrcList<float> list;
-            list.src1 = src[0];
-            list.src2 = src[2U * elements];
-            list.src3 = src[4U * elements];
-            list.src4 = src[6U * elements];
-            MrgSort(dst, list, params);
-            PipeBarrier<PIPE_V>();
-            LocalTensor<float> swap = src; src = dst; dst = swap;
-            groups /= 4U;
-            elements *= 4U;
+        if (count != 0U) {
+            SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+            DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], result,
+                        {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
+            SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
-
-        GatherMaskParams extract{1, static_cast<uint8_t>(CAPACITY / 64U), 8, 0};
-        uint64_t ignored = 0;
-        GatherMask(ids, src.template ReinterpretCast<uint32_t>(), static_cast<uint8_t>(2), false, 0U, extract, ignored);
-        GatherMask(ids[CAPACITY / 2U], src.template ReinterpretCast<uint32_t>()[CAPACITY],
-                   static_cast<uint8_t>(2), false, 0U, extract, ignored);
-        PipeBarrier<PIPE_V>();
-        LocalTensor<int32_t> previous = keys.template ReinterpretCast<int32_t>();
-        previous.SetValue(0, -1);
-        DataCopy(previous[1], ids, CAPACITY - 1U);
-        PipeBarrier<PIPE_V>();
-        LocalTensor<uint8_t> uniqueMask = dst.template ReinterpretCast<uint8_t>();
-        LocalTensor<uint8_t> validMask = uniqueMask[1024U];
-        Compare(uniqueMask, ids, previous, CMPMODE::NE, CAPACITY);
-        PipeBarrier<PIPE_V>();
-        CompareScalar(validMask, ids, -1, CMPMODE::GT, CAPACITY);
-        PipeBarrier<PIPE_V>();
-        And(uniqueMask.template ReinterpretCast<uint32_t>(), uniqueMask.template ReinterpretCast<uint32_t>(),
-            validMask.template ReinterpretCast<uint32_t>(), CAPACITY / 32U);
-        PipeBarrier<PIPE_V>();
-        uint64_t uniqueCount = 0;
-        GatherMask(dst.template ReinterpretCast<int32_t>()[512], ids,
-                   uniqueMask.template ReinterpretCast<uint32_t>(), true, CAPACITY,
-                   {1, 1, 8, 1}, uniqueCount);
-        PipeBarrier<PIPE_V>();
+        countLocal.SetValue(0, static_cast<int32_t>(count));
         SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-        DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], dst.template ReinterpretCast<int32_t>()[512],
-                    {1, static_cast<uint16_t>(uniqueCount * sizeof(int32_t)), 0, 0});
-        previous.SetValue(0, static_cast<int32_t>(uniqueCount));
-        SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-        DataCopyPad(countsGm[b], previous, {1, static_cast<uint16_t>(sizeof(int32_t)), 0, 0});
+        DataCopyPad(countsGm[b], countLocal, {1, static_cast<uint16_t>(sizeof(int32_t)), 0, 0});
     }
     GlobalTensor<int32_t> idsGm, slotsGm, outGm, countsGm;
-    TBuf<TPosition::VECCALC> idsBuf, keysBuf, pair0Buf, pair1Buf;
+    TBuf<TPosition::VECCALC> idsBuf, outBuf, slotsBuf, countBuf;
     uint32_t batchSize = 0U;
 };
 }
