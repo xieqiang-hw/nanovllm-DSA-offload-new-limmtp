@@ -128,9 +128,9 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 
 `fused_li_manage_mtp` 当前阶段实现 MTP3 的 4 路 Lightning Indexer 分数计算、每路 Top-2048
 以及 TopK token 的 HBM hit/miss 判断。四路 query 使用同一个请求的 prefill 满块候选范围。
-对于 miss，`topk_src_ids` 保留 source ID 且 `topk_dst_slots=-1`；对于 hit，
-`topk_src_ids=-1` 且 `topk_dst_slots` 写入合法 HBM slot（包括 slot 0）。当前阶段保持 TopK
-分数顺序，暂不执行 miss/hit 重排、四路 miss 并集、淘汰或 cache 映射更新；
+`topk_src_ids` 当前保留完整 TopK source ID；`topk_dst_slots` 对 miss 写 `-1`，对 hit 写入
+合法 HBM slot（包括 slot 0）。当前阶段保持 TopK 分数顺序，暂不执行 miss/hit 重排、
+四路 miss 并集、淘汰或 cache 映射更新；
 `miss_src_ids`、`miss_dst_slots` 和 `miss_counts` 仍保留给后续阶段。
 
 测试脚本会完成以下检查：

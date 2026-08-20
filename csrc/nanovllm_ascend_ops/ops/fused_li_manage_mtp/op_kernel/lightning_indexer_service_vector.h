@@ -277,15 +277,6 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
     DecodePackedIndex(indexLocal.template ReinterpretCast<uint32_t>(),
                       scratchLocal.template ReinterpretCast<uint32_t>(),
                       constInfo_.sparseCount, hasLongIndexTag);
-    LocalTensor<uint8_t> missMaskLocal = pairLocal.template ReinterpretCast<uint8_t>();
-    CompareScalar(missMaskLocal, slotLocal, constInfo_.INVALID_IDX,
-                  AscendC::CMPMODE::EQ, constInfo_.sparseCount);
-    PipeBarrier<PIPE_V>();
-    Duplicate(scratchLocal, constInfo_.INVALID_IDX, constInfo_.sparseCount);
-    PipeBarrier<PIPE_V>();
-    Select(indexLocal, missMaskLocal, indexLocal, scratchLocal,
-           AscendC::SELMODE::VSEL_TENSOR_TENSOR_MODE, constInfo_.sparseCount);
-    PipeBarrier<PIPE_V>();
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     LIServiceVec::CopyOut(slotOutGm[outputOffset], slotLocal, constInfo_.sparseCount);
 }

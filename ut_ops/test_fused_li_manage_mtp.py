@@ -129,14 +129,13 @@ def main() -> None:
         batch_idx = route_idx // MTP_WIDTH
         reference_slots.append(case["cache_slots"][batch_idx, reference[route_idx].long()])
     reference_slots = torch.stack(reference_slots)
-    expected_src = torch.where(reference_slots >= 0, -1, reference)
 
     call_mtp(case)
     torch.npu.synchronize()
 
     actual = case["topk_src"].reshape(args.batch_size * MTP_WIDTH, TOPK)
     actual_slots = case["topk_dst"].reshape(args.batch_size * MTP_WIDTH, TOPK)
-    src_mismatch = int((expected_src != actual).sum().item())
+    src_mismatch = int((reference != actual).sum().item())
     slot_mismatch = int((reference_slots != actual_slots).sum().item())
     if src_mismatch or slot_mismatch:
         raise AssertionError(
