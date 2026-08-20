@@ -69,6 +69,7 @@ private:
             uint64_t base=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
             DataCopy(work,slotsGm[base],TOPK); Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
             while(len[r]<TOPK && work.GetValue(len[r])<0) ++len[r];
+            missLen[r]=len[r];
         }
         uint32_t total=len[0]+len[1]+len[2]+len[3];
         if(total==0U) return 0U;
@@ -98,6 +99,24 @@ private:
             Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
         return count;
+    }
+
+    __aicore__ inline bool ContainsSorted(uint64_t base,uint32_t begin,uint32_t end,int32_t id) {
+        while(begin<end) {
+            uint32_t mid=begin+(end-begin)/2U;
+            int32_t value=topkSrcGm.GetValue(base+mid);
+            if(value<id) begin=mid+1U; else end=mid;
+        }
+        return begin<TOPK&&topkSrcGm.GetValue(base+begin)==id;
+    }
+
+    __aicore__ inline bool IsProtectedTopk(uint32_t b,int32_t id) {
+        for(uint32_t r=0;r<ROUTES;++r) {
+            uint64_t base=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
+            if(ContainsSorted(base,0U,missLen[r],id)||
+               ContainsSorted(base,missLen[r],TOPK,id)) return true;
+        }
+        return false;
     }
 
     __aicore__ inline void BuildEvictChunk(uint32_t b,uint32_t row,uint32_t start,uint32_t valid,
@@ -171,10 +190,6 @@ private:
         Sync<HardEvent::V_S>(HardEvent::V_S);
         LocalTensor<uint32_t> bits=acc.ReinterpretCast<uint32_t>();
         uint32_t budget=static_cast<uint32_t>(cacheTokensGm.GetValue(b));
-        float threshold[ROUTES]={thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES),
-                                 thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+1U),
-                                 thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+2U),
-                                 thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+3U)};
         uint32_t fallbackCursor=begin*CHUNK;
         for(uint32_t i=0;i<count;++i) {
             int32_t src=static_cast<int32_t>(bits.GetValue(i*2U+1U));
@@ -188,13 +203,7 @@ private:
                     int32_t candidateSlot=cacheSlotsGm.GetValue(
                         static_cast<uint64_t>(row)*sourceCapacity+candidate);
                     if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
-                    bool eligible=true;
-                    for(uint32_t r=0;r<ROUTES;++r) {
-                        float score=scoresGm.GetValue(
-                            (static_cast<uint64_t>(b)*ROUTES+r)*sourceCapacity+candidate);
-                        if(score>=threshold[r]) { eligible=false; break; }
-                    }
-                    if(!eligible) continue;
+                    if(IsProtectedTopk(b,static_cast<int32_t>(candidate))) continue;
                     bool duplicate=false;
                     for(uint32_t prev=0;prev<i;++prev) {
                         if(result.GetValue(prev)==static_cast<int32_t>(candidate)) {
@@ -231,6 +240,7 @@ private:
     GlobalTensor<int32_t> outGm,missDstGm,evictSrcGm,countsGm;
     TBuf<TPosition::VECCALC> pairInBuf,pairOutBuf,workBuf,countBuf;
     uint32_t batchSize=0U,sourceCapacity=0U;
+    uint32_t missLen[ROUTES]={0U,0U,0U,0U};
 };
 }
 extern "C" __global__ __aicore__ void nanovllm_fused_li_manage_mtp_union(
