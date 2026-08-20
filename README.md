@@ -177,5 +177,47 @@ FUSED_LI_MANAGE_MTP_UT_OK
 python3 ut_ops/test_fused_li_manage_mtp.py --help
 ```
 
+### MTP3 union 目标负载
+
+当前测试只覆盖算子已经实现的阶段：四路 LI TopK、hit/miss 重排、unique miss union 和
+`cache_slots_pool` 保持不变。测试不会验证 eviction、HBM slot 分配或 cache 映射更新。
+
+性能数据使用四路相关 query，并通过 `--perf-query-miss-count` 精确控制每一路 TopK 的 miss 数量。
+`--perf-query-noise` 控制四路 TopK 的重合程度；默认 `0.25` 时要求每个请求的 TopK union 大约为
+3000～4000。构造 miss 时优先选择四路共享和两两共享 token，因此 unique union miss 通常为每路
+miss 数量的 1.5～2 倍。`--graph-replays` 额外检查静态输入下 eager 与 ACLGraph replay 输出一致。
+
+目标用例一（每路 200 miss）：
+
+```bash
+python3 ut_ops/test_fused_li_manage_mtp.py \
+  --device npu:0 \
+  --batch-size 24 \
+  --source-len 20992 \
+  --cache-tokens 8192 \
+  --perf-query-miss-count 200 \
+  --perf-query-noise 0.25 \
+  --graph-replays 3 \
+  --warmup 10 \
+  --iters 100 \
+  --seed 7
+```
+
+目标用例二（每路 500 miss）：
+
+```bash
+python3 ut_ops/test_fused_li_manage_mtp.py \
+  --device npu:0 \
+  --batch-size 12 \
+  --source-len 40064 \
+  --cache-tokens 8192 \
+  --perf-query-miss-count 500 \
+  --perf-query-noise 0.25 \
+  --graph-replays 3 \
+  --warmup 10 \
+  --iters 100 \
+  --seed 7
+```
+
 该基线对比使用标准 LightningIndexer 的 `sparse_mode=0`，保证 4 路 query 使用相同的完整 prefill
 候选范围，与 `num_candidate_tokens[B]` 的接口语义一致。
