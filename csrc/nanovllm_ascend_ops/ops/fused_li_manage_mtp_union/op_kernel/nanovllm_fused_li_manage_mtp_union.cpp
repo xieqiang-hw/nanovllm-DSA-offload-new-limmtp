@@ -33,30 +33,13 @@ public:
 private:
     __aicore__ inline void ProcessBatch(uint32_t b) {
         LocalTensor<float> input=pairInBuf.Get<float>(), merged=pairOutBuf.Get<float>();
+        LocalTensor<int32_t> result=input.ReinterpretCast<int32_t>();
         LocalTensor<int32_t> slots=slotsBuf.Get<int32_t>(), countLocal=countBuf.Get<int32_t>();
-        LocalTensor<uint8_t> missMask=input.ReinterpretCast<uint8_t>();
-        LocalTensor<uint32_t> missMaskWords=missMask.ReinterpretCast<uint32_t>();
         uint32_t len[ROUTES]={0U,0U,0U,0U};
         for(uint32_t r=0;r<ROUTES;++r) {
             uint64_t base=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
-            DataCopy(slots,slotsGm[base],TOPK);
-            Sync<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-            Duplicate(missMaskWords,0U,TOPK/32U);
-            PipeBarrier<PIPE_V>();
-            CompareScalar(missMask,slots,0,CMPMODE::LT,TOPK);
-            Sync<HardEvent::V_S>(HardEvent::V_S);
-            for(uint32_t w=0;w<TOPK/32U;++w) {
-                uint32_t word=missMaskWords.GetValue(w);
-                if(word==UINT32_MAX) {
-                    len[r]+=32U;
-                    continue;
-                }
-                while((word&1U)!=0U) {
-                    ++len[r];
-                    word>>=1U;
-                }
-                break;
-            }
+            DataCopy(slots,slotsGm[base],TOPK); Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+            while(len[r]<TOPK && slots.GetValue(len[r])<0) ++len[r];
         }
         uint64_t base=static_cast<uint64_t>(b)*CAPACITY;
         DataCopy(input,pair0Gm[base],CAPACITY);
@@ -71,71 +54,17 @@ private:
         src.src3=input[PAIR_WORDS*2U]; src.src4=input[PAIR_WORDS*3U];
         MrgSort<float>(merged,src,p); Sync<HardEvent::V_S>(HardEvent::V_S);
         uint32_t total=len[0]+len[1]+len[2]+len[3], count=0U;
-        if(total!=0U) {
-            LocalTensor<uint32_t> ids=input.ReinterpretCast<uint32_t>();
-            LocalTensor<int32_t> offsets=ids[CAPACITY].ReinterpretCast<int32_t>();
-            LocalTensor<uint32_t> compact=merged.ReinterpretCast<uint32_t>();
-            LocalTensor<uint32_t> shifted=compact[CAPACITY];
-            LocalTensor<uint8_t> uniqueMask=slots.ReinterpretCast<uint8_t>();
-            LocalTensor<uint32_t> mergedBits=merged.ReinterpretCast<uint32_t>();
-
-            GatherMaskParams extractParams;
-            extractParams.src0BlockStride=1;
-            extractParams.src0RepeatStride=8;
-            extractParams.src1RepeatStride=0;
-            uint64_t extracted=0U;
-            uint32_t fullRepeats=total/32U;
-            if(fullRepeats!=0U) {
-                extractParams.repeatTimes=fullRepeats;
-                GatherMask(ids,mergedBits,static_cast<uint8_t>(1),false,0U,extractParams,extracted);
-            }
-            uint32_t tail=total-fullRepeats*32U;
-            if(tail!=0U) {
-                extractParams.repeatTimes=1;
-                uint64_t tailCount=0U;
-                GatherMask(ids[fullRepeats*32U],mergedBits[fullRepeats*64U],
-                           static_cast<uint8_t>(1),true,tail*2U,extractParams,tailCount);
-            }
-            PipeBarrier<PIPE_V>();
-            Muls(ids.ReinterpretCast<int32_t>(),ids.ReinterpretCast<int32_t>(),-1,total);
-            PipeBarrier<PIPE_V>();
-            uint32_t indexMask=candidatesGm.GetValue(b)>static_cast<int32_t>(SHORT_MASK+1U)?LONG_MASK:SHORT_MASK;
-            Adds(ids.ReinterpretCast<int32_t>(),ids.ReinterpretCast<int32_t>(),
-                 static_cast<int32_t>(indexMask+MISS_KEY_BASE_BITS),total);
-            PipeBarrier<PIPE_V>();
-
-            uint32_t remaining=total-1U;
-            uint64_t kept=0U;
-            if(remaining!=0U) {
-                CreateVecIndex(offsets,static_cast<int32_t>(0),remaining);
-                PipeBarrier<PIPE_V>();
-                Muls(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),remaining);
-                PipeBarrier<PIPE_V>();
-                Adds(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),remaining);
-                PipeBarrier<PIPE_V>();
-                Gather(shifted,ids,offsets.ReinterpretCast<uint32_t>(),0U,remaining);
-                PipeBarrier<PIPE_V>();
-                Duplicate(uniqueMask.ReinterpretCast<uint32_t>(),0U,(remaining+31U)/32U);
-                PipeBarrier<PIPE_V>();
-                Compare(uniqueMask,shifted,ids,CMPMODE::NE,remaining);
-                PipeBarrier<PIPE_V>();
-                GatherMaskParams uniqueParams;
-                uniqueParams.src0BlockStride=1;
-                uniqueParams.repeatTimes=1;
-                uniqueParams.src0RepeatStride=8;
-                uniqueParams.src1RepeatStride=0;
-                GatherMask(compact,shifted,uniqueMask.ReinterpretCast<uint32_t>(),
-                           true,remaining,uniqueParams,kept);
-                Sync<HardEvent::V_S>(HardEvent::V_S);
-            }
-            count=1U+static_cast<uint32_t>(kept);
-            Sync<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-            DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],ids,
-                        {1,static_cast<uint16_t>(sizeof(int32_t)),0,0});
-            if(kept!=0U) {
-                DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+1U],compact,
-                            {1,static_cast<uint16_t>(kept*sizeof(int32_t)),0,0});
-            }
+        uint32_t mask=candidatesGm.GetValue(b)>static_cast<int32_t>(SHORT_MASK+1U)?LONG_MASK:SHORT_MASK;
+        int32_t last=-1; LocalTensor<uint32_t> bits=merged.ReinterpretCast<uint32_t>();
+        for(uint32_t i=0;i<total;++i) {
+            uint32_t key=bits.GetValue(i*2U);
+            int32_t id=static_cast<int32_t>(mask-(key-MISS_KEY_BASE_BITS));
+            if(id!=last) { result.SetValue(count++,id); last=id; }
+        }
+        if(count!=0U) {
+            Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+            DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],result,
+                        {1,static_cast<uint16_t>(count*sizeof(int32_t)),0,0});
             Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
         countLocal.SetValue(0,static_cast<int32_t>(count));

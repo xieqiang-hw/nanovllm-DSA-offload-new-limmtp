@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--max-latency-ratio", type=float, default=1.5)
+    parser.add_argument("--max-latency-ratio", type=float, default=1.25)
     return parser.parse_args()
 
 
