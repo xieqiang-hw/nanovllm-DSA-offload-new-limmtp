@@ -130,8 +130,8 @@ def main() -> None:
         reference_slots.append(case["cache_slots"][batch_idx, reference[route_idx].long()])
     reference_slots = torch.stack(reference_slots)
     # Lexicographic order: miss group first (slot < 0), then source ID ascending.
-    reorder_key = (reference_slots >= 0).to(torch.int64) * (args.seq_len + 1)
-    reorder_key = reorder_key + reference.to(torch.int64)
+    reorder_key = (reference_slots >= 0).to(torch.float32) * float(args.seq_len + 1)
+    reorder_key = reorder_key + reference.to(torch.float32)
     reorder = torch.argsort(reorder_key, dim=-1)
     expected_src = torch.gather(reference, 1, reorder)
     expected_slots = torch.gather(reference_slots, 1, reorder)

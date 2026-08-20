@@ -680,7 +680,10 @@ __aicore__ inline void LIPreload<LIT>::ProcessDecode()
         }
         SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         SyncAll();
-        vectorService.ProcessMissUnion();
+        bool isRequestOwner = (tmpBlockIdx % 2U == 0U) &&
+                              splitCoreInfo.gS1Start == 0U && splitCoreInfo.s2Start == 0U;
+        vectorService.ProcessMissUnion(splitCoreInfo.bN2Start / constInfo.kHeadNum,
+                                       isRequestOwner);
     }
 }
 } // namespace LIKernel

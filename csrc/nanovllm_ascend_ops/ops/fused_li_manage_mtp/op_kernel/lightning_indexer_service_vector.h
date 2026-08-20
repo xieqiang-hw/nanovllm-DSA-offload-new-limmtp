@@ -59,7 +59,7 @@ public:
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
     __aicore__ inline void InitLDBuffers(TPipe *pipe);
-    __aicore__ inline void ProcessMissUnion();
+    __aicore__ inline void ProcessMissUnion(uint32_t batchIdx, bool isRequestOwner);
 
 protected:
     GlobalTensor<MM1_OUT_T> mm1ResGm;
@@ -394,69 +394,64 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
 }
 
 template <typename LIT>
-__aicore__ inline void LIVector<LIT>::ProcessMissUnion()
+__aicore__ inline void LIVector<LIT>::ProcessMissUnion(uint32_t batchIdx, bool isRequestOwner)
 {
     constexpr uint32_t ROUTE_NUM = 4U;
     constexpr uint32_t UNION_CAPACITY = ROUTE_NUM * BASE_TOPK;
-    uint32_t logicalCoreNum = GetBlockNum() * 2U - 1U;
-    uint32_t logicalCoreIdx = static_cast<uint32_t>(blockId_);
-    if (logicalCoreIdx >= logicalCoreNum) {
+    if (!isRequestOwner || batchIdx >= constInfo_.batchSize) {
         return;
     }
 
     LocalTensor<int32_t> routeIdsLocal = ldToBeMrgBuf_.Get<int32_t>();
     LocalTensor<int32_t> unionLocal = ldTmpBuf_.Get<int32_t>();
-    for (uint32_t batchIdx = logicalCoreIdx; batchIdx < constInfo_.batchSize;
-         batchIdx += logicalCoreNum) {
-        uint32_t routeCount[ROUTE_NUM] = {0U, 0U, 0U, 0U};
-        uint32_t routePos[ROUTE_NUM] = {0U, 0U, 0U, 0U};
-        uint64_t unionBase = static_cast<uint64_t>(batchIdx) * UNION_CAPACITY;
+    uint32_t routeCount[ROUTE_NUM] = {0U, 0U, 0U, 0U};
+    uint32_t routePos[ROUTE_NUM] = {0U, 0U, 0U, 0U};
+    uint64_t unionBase = static_cast<uint64_t>(batchIdx) * UNION_CAPACITY;
+    for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
+        int32_t count = missSrcIdsGm.GetValue(unionBase + routeIdx);
+        routeCount[routeIdx] = count > 0 ? static_cast<uint32_t>(count) : 0U;
+        if (routeCount[routeIdx] > 0U) {
+            uint64_t topkBase = (static_cast<uint64_t>(batchIdx) * ROUTE_NUM + routeIdx) * BASE_TOPK;
+            DataCopyPad(routeIdsLocal[routeIdx * BASE_TOPK], indiceOutGm[topkBase],
+                        AscendC::DataCopyExtParams{
+                            1, routeCount[routeIdx] * static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0},
+                        AscendC::DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
+        }
+    }
+    SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+
+    uint32_t unionCount = 0U;
+    int32_t lastId = constInfo_.INVALID_IDX;
+    while (routePos[0] < routeCount[0] || routePos[1] < routeCount[1] ||
+           routePos[2] < routeCount[2] || routePos[3] < routeCount[3]) {
+        int32_t minId = INT32_MAX;
         for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
-            int32_t count = missSrcIdsGm.GetValue(unionBase + routeIdx);
-            routeCount[routeIdx] = count > 0 ? static_cast<uint32_t>(count) : 0U;
-            if (routeCount[routeIdx] > 0U) {
-                uint64_t topkBase = (static_cast<uint64_t>(batchIdx) * ROUTE_NUM + routeIdx) * BASE_TOPK;
-                DataCopyPad(routeIdsLocal[routeIdx * BASE_TOPK], indiceOutGm[topkBase],
-                            AscendC::DataCopyExtParams{
-                                1, routeCount[routeIdx] * static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0},
-                            AscendC::DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
+            if (routePos[routeIdx] < routeCount[routeIdx]) {
+                int32_t candidate = routeIdsLocal.GetValue(
+                    routeIdx * BASE_TOPK + routePos[routeIdx]);
+                minId = candidate < minId ? candidate : minId;
             }
         }
-        SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+        if (minId != lastId) {
+            unionLocal.SetValue(unionCount++, minId);
+            lastId = minId;
+        }
+        for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
+            while (routePos[routeIdx] < routeCount[routeIdx] &&
+                   routeIdsLocal.GetValue(routeIdx * BASE_TOPK + routePos[routeIdx]) == minId) {
+                ++routePos[routeIdx];
+            }
+        }
+    }
 
-        uint32_t unionCount = 0U;
-        int32_t lastId = constInfo_.INVALID_IDX;
-        while (routePos[0] < routeCount[0] || routePos[1] < routeCount[1] ||
-               routePos[2] < routeCount[2] || routePos[3] < routeCount[3]) {
-            int32_t minId = INT32_MAX;
-            for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
-                if (routePos[routeIdx] < routeCount[routeIdx]) {
-                    int32_t candidate = routeIdsLocal.GetValue(
-                        routeIdx * BASE_TOPK + routePos[routeIdx]);
-                    minId = candidate < minId ? candidate : minId;
-                }
-            }
-            if (minId != lastId) {
-                unionLocal.SetValue(unionCount++, minId);
-                lastId = minId;
-            }
-            for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
-                while (routePos[routeIdx] < routeCount[routeIdx] &&
-                       routeIdsLocal.GetValue(routeIdx * BASE_TOPK + routePos[routeIdx]) == minId) {
-                    ++routePos[routeIdx];
-                }
-            }
-        }
-
-        if (unionCount > 0U) {
-            SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-            DataCopyPad(missSrcIdsGm[unionBase], unionLocal,
-                        {1, static_cast<uint16_t>(unionCount * sizeof(int32_t)), 0, 0});
-        }
-        missCountGm.SetValue(batchIdx, static_cast<int32_t>(unionCount));
-        if (unionCount > 0U) {
-            SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
-        }
+    if (unionCount > 0U) {
+        SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+        DataCopyPad(missSrcIdsGm[unionBase], unionLocal,
+                    {1, static_cast<uint16_t>(unionCount * sizeof(int32_t)), 0, 0});
+    }
+    missCountGm.SetValue(batchIdx, static_cast<int32_t>(unionCount));
+    if (unionCount > 0U) {
+        SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
     }
 }
 
