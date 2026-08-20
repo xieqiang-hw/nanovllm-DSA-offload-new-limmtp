@@ -1,5 +1,5 @@
 #include "kernel_operator.h"
-#include "../op_host/fused_li_manage_mtp_union_tiling.h"
+#include "fused_li_manage_mtp_union_tiling.h"
 using namespace AscendC;
 namespace {
 constexpr uint32_t ROUTES = 4U;
