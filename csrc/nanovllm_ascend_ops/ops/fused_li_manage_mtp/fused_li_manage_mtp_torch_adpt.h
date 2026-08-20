@@ -83,7 +83,8 @@ inline void npu_fused_li_manage_mtp(
       miss_src_ids, miss_dst_slots, miss_counts, cache_slots_pool);
   EXEC_NPU_CMD_ORDERED(
       aclnnNanovllmFusedLiManageMtpUnion, keepalive,
-      topk_src_ids, topk_dst_slots, miss_src_ids, miss_counts);
+      miss_src_ids, miss_dst_slots, topk_dst_slots, num_candidate_tokens,
+      miss_src_ids, miss_counts);
 }
 } // namespace vllm_ascend
 #endif

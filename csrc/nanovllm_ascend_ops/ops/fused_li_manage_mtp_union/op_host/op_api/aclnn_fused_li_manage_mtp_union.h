@@ -4,7 +4,8 @@
 #include "aclnn/aclnn_base.h"
 extern "C" {
 __attribute__((visibility("default"))) aclnnStatus aclnnNanovllmFusedLiManageMtpUnionGetWorkspaceSize(
-    const aclTensor *, const aclTensor *, const aclTensor *, const aclTensor *, uint64_t *, aclOpExecutor **);
+    const aclTensor *, const aclTensor *, const aclTensor *, const aclTensor *,
+    const aclTensor *, const aclTensor *, uint64_t *, aclOpExecutor **);
 __attribute__((visibility("default"))) aclnnStatus aclnnNanovllmFusedLiManageMtpUnion(
     void *, uint64_t, aclOpExecutor *, const aclrtStream);
 }

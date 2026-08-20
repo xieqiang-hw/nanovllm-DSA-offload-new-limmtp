@@ -8,8 +8,8 @@ static ge::graphStatus Tiling(gert::TilingContext *context)
 {
     if (context == nullptr) return ge::GRAPH_FAILED;
     const gert::StorageShape *shape = context->GetInputShape(0);
-    if (shape == nullptr || shape->GetStorageShape().GetDimNum() != 3) return ge::GRAPH_FAILED;
-    uint32_t batch = static_cast<uint32_t>(shape->GetStorageShape().GetDim(0) / 4);
+    if (shape == nullptr || shape->GetStorageShape().GetDimNum() != 2) return ge::GRAPH_FAILED;
+    uint32_t batch = static_cast<uint32_t>(shape->GetStorageShape().GetDim(0));
     auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aiv = platform.GetCoreNumAiv();
     context->SetBlockDim(platform.CalcTschBlockDim(std::min(batch, aiv), 0U, aiv));

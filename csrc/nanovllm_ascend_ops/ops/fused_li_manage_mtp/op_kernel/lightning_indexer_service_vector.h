@@ -52,7 +52,8 @@ public:
                                                 GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm,
                                                 GlobalTensor<int32_t> reqPoolEntriesGm,
                                                 GlobalTensor<int32_t> cacheSlotsGm,
-                                                GlobalTensor<int32_t> slotOutGm);
+                                                GlobalTensor<int32_t> slotOutGm,
+                                                __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
@@ -68,6 +69,8 @@ protected:
     GlobalTensor<int32_t> reqPoolEntriesGm;
     GlobalTensor<int32_t> cacheSlotsGm;
     GlobalTensor<int32_t> slotOutGm;
+    GlobalTensor<float> unionPair0Gm;
+    GlobalTensor<float> unionPair1Gm;
     // =================================常量区=================================
 
 private:
@@ -209,7 +212,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
                                     GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm,
                                     GlobalTensor<int32_t> reqPoolEntriesGm,
                                     GlobalTensor<int32_t> cacheSlotsGm,
-                                    GlobalTensor<int32_t> slotOutGm)
+                                    GlobalTensor<int32_t> slotOutGm,
+                                    __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
@@ -220,6 +224,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
     this->reqPoolEntriesGm = reqPoolEntriesGm;
     this->cacheSlotsGm = cacheSlotsGm;
     this->slotOutGm = slotOutGm;
+    this->unionPair0Gm.SetGlobalBuffer((__gm__ float *)unionPair0);
+    this->unionPair1Gm.SetGlobalBuffer((__gm__ float *)unionPair1);
 }
 
 template <typename LIT>
@@ -370,7 +376,17 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
         PipeBarrier<PIPE_V>();
     }
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+    const uint64_t route = outputOffset / BASE_TOPK;
+    const uint64_t batch = route / 4U;
+    const uint64_t routeInBatch = route % 4U;
+    const uint64_t pairOffset = batch * BASE_TOPK * 4U + (routeInBatch % 2U) * BASE_TOPK * 2U;
+    if (routeInBatch < 2U) {
+        LIServiceVec::CopyOut(unionPair0Gm[pairOffset], pairLocal, BASE_TOPK * 2U);
+    } else {
+        LIServiceVec::CopyOut(unionPair1Gm[pairOffset], pairLocal, BASE_TOPK * 2U);
+    }
     LIServiceVec::CopyOut(slotOutGm[outputOffset], slotLocal, constInfo_.sparseCount);
+    SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
 }
 
 template <typename LIT>

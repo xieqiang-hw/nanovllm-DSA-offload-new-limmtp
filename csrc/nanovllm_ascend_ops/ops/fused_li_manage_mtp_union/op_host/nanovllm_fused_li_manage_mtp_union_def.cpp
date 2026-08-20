@@ -4,8 +4,10 @@ class NanovllmFusedLiManageMtpUnion : public OpDef {
 public:
     explicit NanovllmFusedLiManageMtpUnion(const char *name) : OpDef(name)
     {
-        this->Input("topk_src_ids").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("union_pair0").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("union_pair1").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
         this->Input("topk_dst_slots").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("num_candidate_tokens").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND}).AutoContiguous();
         this->Output("miss_src_ids").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("miss_counts").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         OpAICoreConfig config;

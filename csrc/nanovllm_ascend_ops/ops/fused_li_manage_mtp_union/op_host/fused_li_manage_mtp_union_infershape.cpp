@@ -5,13 +5,13 @@ static ge::graphStatus InferShape(gert::InferShapeContext *context)
 {
     if (context == nullptr) return ge::GRAPH_FAILED;
     const gert::Shape *topk = context->GetInputShape(0);
-    if (topk == nullptr || topk->GetDimNum() != 3 || topk->GetDim(0) % 4 != 0)
+    if (topk == nullptr || topk->GetDimNum() != 2)
         return ge::GRAPH_FAILED;
     gert::Shape *ids = context->GetOutputShape(0);
     gert::Shape *counts = context->GetOutputShape(1);
     if (ids == nullptr || counts == nullptr) return ge::GRAPH_FAILED;
-    ids->SetDimNum(2); ids->SetDim(0, topk->GetDim(0) / 4); ids->SetDim(1, 8192);
-    counts->SetDimNum(1); counts->SetDim(0, topk->GetDim(0) / 4);
+    ids->SetDimNum(2); ids->SetDim(0, topk->GetDim(0)); ids->SetDim(1, 8192);
+    counts->SetDimNum(1); counts->SetDim(0, topk->GetDim(0));
     return ge::GRAPH_SUCCESS;
 }
 static ge::graphStatus InferType(gert::InferDataTypeContext *context)
