@@ -60,6 +60,7 @@ protected:
     GlobalTensor<int64_t> vec1ParamGm;
     GlobalTensor<K_T> weightsGm;
     GlobalTensor<int32_t> indiceOutGm;
+    GlobalTensor<int32_t> slotOutGm;
     GlobalTensor<K_T> valueOutGm;
     // =================================常量区=================================
 
@@ -189,6 +190,7 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
     this->weightsGm = weightsGm;
     this->indiceOutGm = indiceOutGm;
     this->valueOutGm = valueOutGm;
+    this->slotOutGm.SetGlobalBuffer((__gm__ int32_t *)valueOutGm.GetPhyAddr());
 }
 
 template <typename LIT>
@@ -211,6 +213,7 @@ __aicore__ inline void LIVector<LIT>::CleanInvalidOutput(int64_t invalidS1offset
     outQueue_.EnQue<float>(valueULocal);
     valueULocal = outQueue_.DeQue<float>();
     LIServiceVec::CopyOut(indiceOutGm[invalidS1offset], idxULocal1, constInfo_.sparseCount);
+    LIServiceVec::CopyOut(slotOutGm[invalidS1offset], idxULocal1, constInfo_.sparseCount);
     outQueue_.FreeTensor(valueULocal);
 
     if (constInfo_.returnValue) {
@@ -388,8 +391,12 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                     outQueue_.EnQue<float>(valueULocal);
                     valueULocal = outQueue_.DeQue<float>();
                     LocalTensor<int32_t> idxULocal1 = valueULocal.template ReinterpretCast<int32_t>()[BASE_TOPK];
-                    LIServiceVec::CopyOut(indiceOutGm[info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount],
-                                        idxULocal1, constInfo_.sparseCount);
+                    int64_t outputOffset = info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount;
+                    LIServiceVec::CopyOut(indiceOutGm[outputOffset], idxULocal1, constInfo_.sparseCount);
+                    SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+                    Duplicate(idxULocal1, constInfo_.INVALID_IDX, constInfo_.sparseCount);
+                    PipeBarrier<PIPE_V>();
+                    LIServiceVec::CopyOut(slotOutGm[outputOffset], idxULocal1, constInfo_.sparseCount);
                     outQueue_.FreeTensor(valueULocal);
                 } else {
                     LocalTensor<float> outValueUb = outQueue_.AllocTensor<float>();

@@ -10,17 +10,12 @@
 
 using namespace LIKernel;
 
-__aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
-                                                  __gm__ uint8_t *missCount,
-                                                  uint32_t batchSize)
+__aicore__ inline void InitMtpMissCount(__gm__ uint8_t *missCount, uint32_t batchSize)
 {
     if ASCEND_IS_AIV {
         if (GetBlockIdx() == 0U) {
-            GlobalTensor<int32_t> topkSlotsGm;
             GlobalTensor<int32_t> missCountGm;
-            topkSlotsGm.SetGlobalBuffer((__gm__ int32_t *)topkSlots);
             missCountGm.SetGlobalBuffer((__gm__ int32_t *)missCount);
-            AscendC::InitGlobalMemory(topkSlotsGm, static_cast<uint64_t>(batchSize) * 4U * 2048U, -1);
             AscendC::InitGlobalMemory(missCountGm, batchSize, 0);
         }
     }
@@ -37,7 +32,7 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
         op.Init(query, key, weights, nullptr, actualSeqLengths, blockTable, topkIndex, topkSlots,                      \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
-        InitMtpPlaceholderOutputs(topkSlots, missCount, tiling_data->bSize);                                            \
+        InitMtpMissCount(missCount, tiling_data->bSize);                                                               \
     } while (0)
 
 template <int DT>
