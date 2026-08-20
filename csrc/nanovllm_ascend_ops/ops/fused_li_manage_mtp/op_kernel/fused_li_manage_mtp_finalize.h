@@ -66,18 +66,30 @@ private:
     __aicore__ inline uint32_t BuildUnion(uint32_t b, LocalTensor<float> input,
                                           LocalTensor<float> merged, LocalTensor<int32_t> result,
                                           LocalTensor<int32_t> work) {
+        (void)work;
+        uint64_t base=static_cast<uint64_t>(b)*CAPACITY;
+        DataCopy(input,pair0Gm[base],CAPACITY); DataCopy(input[CAPACITY],pair1Gm[base],CAPACITY);
+        Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
         uint32_t len[ROUTES]={0U,0U,0U,0U};
+        LocalTensor<uint32_t> inputBits=input.ReinterpretCast<uint32_t>();
         for(uint32_t r=0;r<ROUTES;++r) {
-            uint64_t base=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
-            DataCopy(work,slotsGm[base],TOPK); Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
-            while(len[r]<TOPK && work.GetValue(len[r])<0) ++len[r];
+            // SortTopkBySlotIndex encodes every miss key at or above
+            // MISS_KEY_BASE_BITS and every hit key below it.  The union pairs
+            // are already needed below, so derive the four miss lengths from
+            // them instead of rereading and scalar-scanning 4 * 2048 slots.
+            uint32_t routeOffset=r*PAIR_WORDS;
+            uint32_t lo=0U,hi=TOPK;
+            while(lo<hi) {
+                uint32_t mid=(lo+hi)>>1U;
+                if(inputBits.GetValue(routeOffset+mid*2U)>=MISS_KEY_BASE_BITS) lo=mid+1U;
+                else hi=mid;
+            }
+            len[r]=lo;
             missLen[r]=len[r];
         }
         uint32_t total=len[0]+len[1]+len[2]+len[3];
         if(total==0U) return 0U;
-        uint64_t base=static_cast<uint64_t>(b)*CAPACITY;
-        DataCopy(input,pair0Gm[base],CAPACITY); DataCopy(input[CAPACITY],pair1Gm[base],CAPACITY);
-        Sync<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        Sync<HardEvent::S_V>(HardEvent::S_V);
         MrgSort4Info p;
         p.elementLengths[0]=len[0]; p.elementLengths[1]=len[1];
         p.elementLengths[2]=len[2]; p.elementLengths[3]=len[3];
