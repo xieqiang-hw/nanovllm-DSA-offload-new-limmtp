@@ -24,7 +24,7 @@ public:
         countsGm.SetGlobalBuffer((__gm__ int32_t *)counts);
         batchSize = tiling->batchSize;
         pipe->InitBuffer(idsBuf, CAPACITY * sizeof(int32_t));
-        pipe->InitBuffer(keysBuf, (CAPACITY / 2U) * sizeof(float));
+        pipe->InitBuffer(keysBuf, CAPACITY * sizeof(float));
         pipe->InitBuffer(pair0Buf, CAPACITY * 2U * sizeof(float));
         pipe->InitBuffer(pair1Buf, CAPACITY * 2U * sizeof(float));
     }
@@ -43,6 +43,7 @@ private:
         LocalTensor<float> pair1 = pair1Buf.Get<float>();
         uint32_t lengths[ROUTES] = {0U, 0U, 0U, 0U};
         Duplicate(ids, -1, CAPACITY);
+        Duplicate(keys, -3.402823466e+38F, CAPACITY);
         PipeBarrier<PIPE_V>();
         for (uint32_t r = 0; r < ROUTES; ++r) {
             uint64_t base = (static_cast<uint64_t>(b) * ROUTES + r) * TOPK;
@@ -56,23 +57,21 @@ private:
             }
         }
         SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
-        constexpr uint32_t HALF_CAPACITY = CAPACITY / 2U;
-        constexpr uint32_t HALF_SORT_REPEATS = HALF_CAPACITY / 32U;
-        for (uint32_t half = 0; half < 2U; ++half) {
-            Duplicate(keys, -3.402823466e+38F, HALF_CAPACITY);
-            PipeBarrier<PIPE_V>();
-            for (uint32_t localRoute = 0; localRoute < 2U; ++localRoute) {
-                uint32_t r = half * 2U + localRoute;
-                if (lengths[r] == 0U) continue;
-                Cast(keys[localRoute * TOPK], ids[r * TOPK], RoundMode::CAST_NONE, lengths[r]);
+        for (uint32_t r = 0; r < ROUTES; ++r) {
+            if (lengths[r] != 0U) {
+                Cast(keys[r * TOPK], ids[r * TOPK], RoundMode::CAST_NONE, lengths[r]);
                 PipeBarrier<PIPE_V>();
-                Muls(keys[localRoute * TOPK], keys[localRoute * TOPK], -1.0F, lengths[r]);
+                Muls(keys[r * TOPK], keys[r * TOPK], -1.0F, lengths[r]);
                 PipeBarrier<PIPE_V>();
             }
-            Sort32(pair0[half * HALF_CAPACITY * 2U], keys,
-                   ids.template ReinterpretCast<uint32_t>()[half * HALF_CAPACITY], HALF_SORT_REPEATS);
-            PipeBarrier<PIPE_V>();
         }
+
+        constexpr uint32_t HALF_CAPACITY = CAPACITY / 2U;
+        constexpr uint32_t HALF_SORT_REPEATS = HALF_CAPACITY / 32U;
+        Sort32(pair0, keys, ids.template ReinterpretCast<uint32_t>(), HALF_SORT_REPEATS);
+        Sort32(pair0[HALF_CAPACITY * 2U], keys[HALF_CAPACITY],
+               ids.template ReinterpretCast<uint32_t>()[HALF_CAPACITY], HALF_SORT_REPEATS);
+        PipeBarrier<PIPE_V>();
         uint32_t groups = CAPACITY / 32U;
         uint32_t elements = 32U;
         LocalTensor<float> src = pair0;
@@ -104,8 +103,8 @@ private:
         GatherMask(idsU[CAPACITY / 2U], src.template ReinterpretCast<uint32_t>()[CAPACITY],
                    static_cast<uint8_t>(2), false, 0U, extract, ignored);
         PipeBarrier<PIPE_V>();
-        LocalTensor<int32_t> previous = dst.template ReinterpretCast<int32_t>();
-        LocalTensor<int32_t> offsets = dst.template ReinterpretCast<int32_t>()[CAPACITY];
+        LocalTensor<int32_t> previous = keys.template ReinterpretCast<int32_t>();
+        LocalTensor<int32_t> offsets = dst.template ReinterpretCast<int32_t>();
         CreateVecIndex(offsets, static_cast<int32_t>(0), CAPACITY);
         PipeBarrier<PIPE_V>();
         Muls(offsets, offsets, static_cast<int32_t>(sizeof(int32_t)), CAPACITY);
@@ -116,7 +115,7 @@ private:
         Gather(previous, ids, offsets.template ReinterpretCast<uint32_t>(), 0U, CAPACITY);
         PipeBarrier<PIPE_V>();
         previous.SetValue(0, -1);
-        LocalTensor<uint8_t> uniqueMask = keys.template ReinterpretCast<uint8_t>();
+        LocalTensor<uint8_t> uniqueMask = dst[CAPACITY].template ReinterpretCast<uint8_t>();
         LocalTensor<uint8_t> validMask = uniqueMask[1024U];
         Compare(uniqueMask, ids, previous, CMPMODE::NE, CAPACITY);
         PipeBarrier<PIPE_V>();
@@ -126,12 +125,12 @@ private:
             validMask.template ReinterpretCast<uint32_t>(), CAPACITY / 32U);
         PipeBarrier<PIPE_V>();
         uint64_t uniqueCount = 0;
-        GatherMask(dst.template ReinterpretCast<int32_t>()[CAPACITY], ids,
+        GatherMask(dst.template ReinterpretCast<int32_t>(), ids,
                    uniqueMask.template ReinterpretCast<uint32_t>(), true, CAPACITY,
                    {1, 1, 8, 1}, uniqueCount);
         PipeBarrier<PIPE_V>();
         SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-        DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], dst.template ReinterpretCast<int32_t>()[CAPACITY],
+        DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], dst.template ReinterpretCast<int32_t>(),
                     {1, static_cast<uint16_t>(uniqueCount * sizeof(int32_t)), 0, 0});
         previous.SetValue(0, static_cast<int32_t>(uniqueCount));
         SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
