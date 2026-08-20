@@ -114,11 +114,13 @@ private:
             uint32_t blockNum=(remaining+63U)/64U;
             uint32_t uniqueTailCount=0U;
             if(remaining!=0U) {
-                CreateVecIndex(offsets,static_cast<int32_t>(0),64U);
+                CreateVecIndex(offsets,static_cast<int32_t>(0),remaining);
                 PipeBarrier<PIPE_V>();
-                Muls(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),64U);
+                Muls(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),remaining);
                 PipeBarrier<PIPE_V>();
-                Adds(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),64U);
+                Adds(offsets,offsets,static_cast<int32_t>(sizeof(uint32_t)),remaining);
+                PipeBarrier<PIPE_V>();
+                Gather(shifted,idsFloat,offsets.ReinterpretCast<uint32_t>(),0U,remaining);
                 PipeBarrier<PIPE_V>();
                 GatherMaskParams uniqueParams;
                 uniqueParams.src0BlockStride=1;
@@ -129,9 +131,6 @@ private:
                     uint32_t blockOffset=block*64U;
                     uint32_t blockLen=remaining-blockOffset;
                     blockLen=blockLen>64U?64U:blockLen;
-                    Gather(shifted[blockOffset],idsFloat[blockOffset],
-                           offsets.ReinterpretCast<uint32_t>(),0U,blockLen);
-                    PipeBarrier<PIPE_V>();
                     Duplicate(uniqueMask.ReinterpretCast<uint32_t>(),0U,2U);
                     PipeBarrier<PIPE_V>();
                     Compare(uniqueMask,shifted[blockOffset],idsFloat[blockOffset],CMPMODE::NE,blockLen);
