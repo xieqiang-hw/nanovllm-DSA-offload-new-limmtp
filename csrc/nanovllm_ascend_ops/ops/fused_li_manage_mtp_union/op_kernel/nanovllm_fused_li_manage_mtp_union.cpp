@@ -171,11 +171,40 @@ private:
         Sync<HardEvent::V_S>(HardEvent::V_S);
         LocalTensor<uint32_t> bits=acc.ReinterpretCast<uint32_t>();
         uint32_t budget=static_cast<uint32_t>(cacheTokensGm.GetValue(b));
+        float threshold[ROUTES]={thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES),
+                                 thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+1U),
+                                 thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+2U),
+                                 thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+3U)};
+        uint32_t fallbackCursor=begin*CHUNK;
         for(uint32_t i=0;i<count;++i) {
             int32_t src=static_cast<int32_t>(bits.GetValue(i*2U+1U));
             int32_t slot=(src>=0&&static_cast<uint32_t>(src)<actual)?
                          cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+src):-1;
             if(slot<0||static_cast<uint32_t>(slot)>=budget) { src=-1; slot=-1; }
+            if(src<0) {
+                for(uint32_t scanned=0;scanned<actual;++scanned) {
+                    uint32_t candidate=fallbackCursor++;
+                    if(fallbackCursor>=actual) fallbackCursor=0U;
+                    int32_t candidateSlot=cacheSlotsGm.GetValue(
+                        static_cast<uint64_t>(row)*sourceCapacity+candidate);
+                    if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
+                    bool eligible=true;
+                    for(uint32_t r=0;r<ROUTES;++r) {
+                        float score=scoresGm.GetValue(
+                            (static_cast<uint64_t>(b)*ROUTES+r)*sourceCapacity+candidate);
+                        if(score>=threshold[r]) { eligible=false; break; }
+                    }
+                    if(!eligible) continue;
+                    bool duplicate=false;
+                    for(uint32_t prev=0;prev<i;++prev) {
+                        if(result.GetValue(prev)==static_cast<int32_t>(candidate)) {
+                            duplicate=true; break;
+                        }
+                    }
+                    if(duplicate) continue;
+                    src=static_cast<int32_t>(candidate); slot=candidateSlot; break;
+                }
+            }
             result.SetValue(i,src); result.SetValue(CAPACITY+i,slot);
         }
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
