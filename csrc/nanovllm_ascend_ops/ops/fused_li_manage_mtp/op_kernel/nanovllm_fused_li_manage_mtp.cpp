@@ -14,15 +14,18 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
                                                   __gm__ uint8_t *missCount,
                                                   uint32_t batchSize)
 {
-    if ASCEND_IS_AIC {
+    if ASCEND_IS_AIV {
         constexpr uint32_t MAX_INIT_ELEMENTS = 4096U;
-        uint32_t aicCoreNum = GetBlockNum();
-        uint32_t aicCoreIdx = GetBlockIdx();
+        uint32_t aivCoreNum = GetBlockNum() * 2U;
+        uint32_t aivCoreIdx = GetBlockIdx();
         uint64_t totalSlotElements = static_cast<uint64_t>(batchSize) * 4U * 2048U;
-        uint64_t elementsPerCore = (totalSlotElements + aicCoreNum - 1U) / aicCoreNum;
-        uint64_t coreStart = static_cast<uint64_t>(aicCoreIdx) * elementsPerCore;
+        uint64_t elementsPerCore = (totalSlotElements + aivCoreNum - 1U) / aivCoreNum;
+        uint64_t coreStart = static_cast<uint64_t>(aivCoreIdx) * elementsPerCore;
         uint64_t remainingElements = coreStart < totalSlotElements ? totalSlotElements - coreStart : 0U;
         uint64_t coreElements = elementsPerCore < remainingElements ? elementsPerCore : remainingElements;
+        if (aivCoreIdx == aivCoreNum - 1U) {
+            coreElements = 0U;
+        }
         GlobalTensor<int32_t> topkSlotsGm;
         topkSlotsGm.SetGlobalBuffer((__gm__ int32_t *)topkSlots);
         for (uint64_t offset = 0; offset < coreElements; offset += MAX_INIT_ELEMENTS) {
@@ -34,6 +37,19 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
             AscendC::InitGlobalMemory(topkSlotsSlice, initElements, -1);
         }
         if (GetBlockIdx() == 0U) {
+            // Some 910B deployments expose 24 AICs but schedule only 47 of the
+            // nominal 48 AIVs. Core 0 always owns the nominal last AIV slice so
+            // output coverage does not depend on whether that last AIV runs.
+            uint64_t tailStart = static_cast<uint64_t>(aivCoreNum - 1U) * elementsPerCore;
+            uint64_t tailElements = tailStart < totalSlotElements ? totalSlotElements - tailStart : 0U;
+            for (uint64_t offset = 0; offset < tailElements; offset += MAX_INIT_ELEMENTS) {
+                uint64_t remainingTailElements = tailElements - offset;
+                uint64_t initElements = MAX_INIT_ELEMENTS < remainingTailElements
+                    ? static_cast<uint64_t>(MAX_INIT_ELEMENTS)
+                    : remainingTailElements;
+                GlobalTensor<int32_t> tailSlice = topkSlotsGm[tailStart + offset];
+                AscendC::InitGlobalMemory(tailSlice, initElements, -1);
+            }
             GlobalTensor<int32_t> missCountGm;
             missCountGm.SetGlobalBuffer((__gm__ int32_t *)missCount);
             AscendC::InitGlobalMemory(missCountGm, batchSize, 0);
