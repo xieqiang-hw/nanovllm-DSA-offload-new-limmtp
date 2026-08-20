@@ -1,10 +1,18 @@
 #include "kernel_operator.h"
+#include "kernel_operator_list_tensor_intf.h"
 #include "fused_li_manage_mtp_union_tiling.h"
 using namespace AscendC;
 namespace {
 constexpr uint32_t ROUTES = 4U;
 constexpr uint32_t TOPK = 2048U;
 constexpr uint32_t CAPACITY = ROUTES * TOPK;
+template <HardEvent event>
+__aicore__ inline void SetWaitFlag(HardEvent evt)
+{
+    event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(evt));
+    AscendC::SetFlag<event>(eventId);
+    AscendC::WaitFlag<event>(eventId);
+}
 class MtpMissUnion {
 public:
     __aicore__ inline void Init(GM_ADDR ids, GM_ADDR slots, GM_ADDR out, GM_ADDR counts,
@@ -62,7 +70,7 @@ private:
         if (count != 0U) {
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
             DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], result,
-                        {1, count * static_cast<uint32_t>(sizeof(int32_t)), 0, 0});
+                        {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
         }
         countsGm.SetValue(b, static_cast<int32_t>(count));
     }
