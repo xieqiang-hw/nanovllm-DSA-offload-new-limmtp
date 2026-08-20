@@ -289,7 +289,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     cases = (
         ("minimum_len_all_hit_bf16", dict(seq_len=TOPK, cache_tokens=TOPK,
                                            dtype="bf16"), "all_hit"),
-        ("fp16_one_miss", dict(seq_len=8192, cache_tokens=8192, dtype="fp16",
+        ("fp16_one_miss", dict(seq_len=8192, cache_tokens=8064, dtype="fp16",
                                perf_query_miss_count=1), "balanced"),
         ("partial_budget", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
                                 perf_query_miss_count=64), "balanced"),
@@ -344,7 +344,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     print("FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN case=noncontiguous_request_pool",
           flush=True)
     edge_args = boundary_args(args, seed=args.seed + 200, seq_len=8192,
-                              cache_tokens=8192, dtype="bf16",
+                              cache_tokens=8064, dtype="bf16",
                               perf_query_miss_count=1)
     case = make_case(edge_args)
     reference = call_standard(case).reshape(MTP_WIDTH, TOPK)
