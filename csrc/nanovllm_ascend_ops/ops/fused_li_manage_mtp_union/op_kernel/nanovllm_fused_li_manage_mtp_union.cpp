@@ -102,9 +102,9 @@ private:
     }
 
     __aicore__ inline void InitUsedSlotMap(uint32_t b,LocalTensor<float> work) {
-        LocalTensor<uint8_t> used=work.ReinterpretCast<uint8_t>();
-        LocalTensor<int32_t> chunk=work[CAPACITY/4U].ReinterpretCast<int32_t>();
-        Duplicate(used,static_cast<uint8_t>(0),CAPACITY); PipeBarrier<PIPE_V>();
+        LocalTensor<uint16_t> used=work.ReinterpretCast<uint16_t>();
+        LocalTensor<int32_t> chunk=work[CAPACITY/2U].ReinterpretCast<int32_t>();
+        Duplicate(used,static_cast<uint16_t>(0),CAPACITY); PipeBarrier<PIPE_V>();
         for(uint32_t r=0;r<ROUTES;++r) {
             uint64_t base=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
             for(uint32_t off=0;off<TOPK;off+=CHUNK) {
@@ -113,7 +113,7 @@ private:
                 for(uint32_t i=0;i<CHUNK;++i) {
                     int32_t slot=chunk.GetValue(i);
                     if(slot>=0&&static_cast<uint32_t>(slot)<CAPACITY)
-                        used.SetValue(static_cast<uint32_t>(slot),static_cast<uint8_t>(1));
+                        used.SetValue(static_cast<uint32_t>(slot),static_cast<uint16_t>(1));
                 }
             }
         }
@@ -193,7 +193,7 @@ private:
         uint32_t fallbackCursor=begin*CHUNK;
         uint32_t candidateCursor=0U;
         InitUsedSlotMap(b,work);
-        LocalTensor<uint8_t> usedSlots=work.ReinterpretCast<uint8_t>();
+        LocalTensor<uint16_t> usedSlots=work.ReinterpretCast<uint16_t>();
         for(uint32_t i=0;i<count;++i) {
             int32_t src=-1, slot=-1;
             while(candidateCursor<candidateCap) {
@@ -223,7 +223,7 @@ private:
                     src=static_cast<int32_t>(candidate); slot=candidateSlot; break;
                 }
             }
-            if(slot>=0) usedSlots.SetValue(static_cast<uint32_t>(slot),static_cast<uint8_t>(1));
+            if(slot>=0) usedSlots.SetValue(static_cast<uint32_t>(slot),static_cast<uint16_t>(1));
             result.SetValue(i,src); result.SetValue(CAPACITY+i,slot);
         }
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
