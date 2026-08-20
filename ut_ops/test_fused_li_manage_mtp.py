@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--perf-query-miss-count", type=int, default=200)
     parser.add_argument("--perf-query-noise", type=float, default=0.25)
     parser.add_argument("--graph-replays", type=int, default=3)
+    parser.add_argument("--skip-boundary-tests", action="store_true",
+                        help="skip the small correctness-only edge-case matrix")
     parser.add_argument("--max-latency-ratio", type=float, default=1.5)
     return parser.parse_args()
 
@@ -192,20 +194,166 @@ def build_balanced_cache(case: dict[str, torch.Tensor], reference: torch.Tensor,
 def run_graph_check(case: dict[str, torch.Tensor], replays: int) -> None:
     if replays == 0:
         return
-    expected = [case[name].clone() for name in
-                ("topk_src", "topk_dst", "miss_src", "miss_counts")]
     graph = torch.npu.NPUGraph()
     pool = torch.npu.graph_pool_handle()
     with torch.npu.graph(graph, pool=pool):
         call_mtp(case)
     torch.npu.synchronize()
-    for _ in range(replays):
+    for replay in range(replays):
+        # Mutate data in-place while retaining captured addresses. This catches
+        # accidental value specialization and stale-output reuse.
+        case["query"].add_(torch.tensor((replay + 1) * 1e-3,
+                                        dtype=case["query"].dtype,
+                                        device=case["query"].device))
         graph.replay()
+        torch.npu.synchronize()
+        captured = [case[name].clone() for name in
+                    ("topk_src", "topk_dst", "miss_src", "miss_counts")]
+        call_mtp(case)
+        torch.npu.synchronize()
+        eager = [case[name] for name in
+                 ("topk_src", "topk_dst", "miss_src", "miss_counts")]
+        if any(not torch.equal(lhs, rhs) for lhs, rhs in zip(captured, eager)):
+            raise AssertionError(
+                f"ACLGraph replay outputs differ from eager outputs at replay={replay}")
+    print(f"FUSED_LI_MANAGE_MTP_GRAPH_CHECK replays={replays} dynamic_query=1 ok=1",
+          flush=True)
+
+
+def expected_outputs(case: dict[str, torch.Tensor], reference: torch.Tensor
+                     ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    """Derive reorder and union results from standard LI and the persistent map."""
+    flat_reference = reference.reshape(case["batch"] * MTP_WIDTH, TOPK)
+    reference_slots = []
+    for route_idx in range(case["batch"] * MTP_WIDTH):
+        request = route_idx // MTP_WIDTH
+        pool_row = int(case["req_entries"][request].item())
+        reference_slots.append(
+            case["cache_slots"][pool_row, flat_reference[route_idx].long()])
+    reference_slots = torch.stack(reference_slots)
+    reorder_key = ((reference_slots >= 0).to(torch.float32) *
+                   float(case["args"].seq_len + 1) + flat_reference.to(torch.float32))
+    reorder = torch.argsort(reorder_key, dim=-1)
+    expected_src = torch.gather(flat_reference, 1, reorder)
+    expected_slots = torch.gather(reference_slots, 1, reorder)
+    unions = []
+    for request in range(case["batch"]):
+        begin = request * MTP_WIDTH
+        end = begin + MTP_WIDTH
+        misses = expected_src[begin:end][expected_slots[begin:end] < 0]
+        unions.append(torch.unique(misses, sorted=True))
+    return expected_src, expected_slots, unions
+
+
+def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
+               label: str, require_slot_zero: bool = False) -> list[int]:
+    expected_src, expected_slots, expected_union = expected_outputs(case, reference)
+    old_cache = case["cache_slots"].clone()
+    call_mtp(case)
     torch.npu.synchronize()
-    actual = [case[name] for name in ("topk_src", "topk_dst", "miss_src", "miss_counts")]
-    if any(not torch.equal(lhs, rhs) for lhs, rhs in zip(actual, expected)):
-        raise AssertionError("ACLGraph replay outputs differ from eager outputs")
-    print(f"FUSED_LI_MANAGE_MTP_GRAPH_CHECK replays={replays} static_inputs=1 ok=1",
+    actual_src = case["topk_src"].reshape(case["batch"] * MTP_WIDTH, TOPK)
+    actual_slots = case["topk_dst"].reshape(case["batch"] * MTP_WIDTH, TOPK)
+    src_mismatch = int((expected_src != actual_src).sum().item())
+    slot_mismatch = int((expected_slots != actual_slots).sum().item())
+    if src_mismatch or slot_mismatch:
+        raise AssertionError(
+            f"{label}: TopK/reorder mismatch: src={src_mismatch}, slots={slot_mismatch}")
+    if require_slot_zero and int((actual_slots == 0).sum().item()) == 0:
+        raise AssertionError(f"{label}: legal HBM slot 0 was not exercised")
+    expected_counts = [int(ids.numel()) for ids in expected_union]
+    actual_counts = case["miss_counts"].cpu().tolist()
+    if actual_counts != expected_counts:
+        raise AssertionError(
+            f"{label}: union counts differ: actual={actual_counts}, expected={expected_counts}")
+    for request, ids in enumerate(expected_union):
+        actual = case["miss_src"][request, :ids.numel()]
+        if not torch.equal(actual, ids):
+            raise AssertionError(
+                f"{label}: union IDs differ for request={request}, "
+                f"mismatches={int((actual != ids).sum().item())}")
+    if not torch.equal(case["cache_slots"], old_cache):
+        raise AssertionError(f"{label}: cache_slots_pool was modified")
+    return expected_counts
+
+
+def boundary_args(base: argparse.Namespace, **overrides) -> argparse.Namespace:
+    values = vars(base).copy()
+    values.update(batch_size=1, warmup=0, iters=0, graph_replays=0,
+                  perf_query_noise=0.25, perf_query_miss_count=0)
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def run_boundary_tests(args: argparse.Namespace) -> None:
+    """Correctness-only coverage for semantics implemented through miss union."""
+    cases = (
+        ("minimum_len_all_hit_bf16", dict(seq_len=TOPK, cache_tokens=TOPK,
+                                           dtype="bf16"), "all_hit"),
+        ("fp16_one_miss", dict(seq_len=8192, cache_tokens=8192, dtype="fp16",
+                               perf_query_miss_count=1), "balanced"),
+        ("partial_budget", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+                                perf_query_miss_count=64), "balanced"),
+        ("all_miss", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
+                          perf_query_noise=2.0), "all_miss"),
+        ("identical_routes", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
+                                  perf_query_noise=1e-6), "all_miss"),
+        ("union_capacity", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
+                                perf_query_noise=4.0), "all_miss"),
+    )
+    summaries = []
+    for index, (label, overrides, cache_mode) in enumerate(cases):
+        edge_args = boundary_args(args, seed=args.seed + 100 + index, **overrides)
+        case = make_case(edge_args)
+        if label == "identical_routes":
+            case["query"].copy_(case["query"][0:1].expand_as(case["query"]))
+        if label == "union_capacity":
+            # Give each route an exclusive 2048-token score band. The four
+            # TopKs are disjoint, so the all-miss union reaches capacity 8192.
+            case["query"].zero_()
+            case["weights"].zero_()
+            case["weights"][:, 0] = 1
+            case["key"].zero_()
+            flat_key = case["key"].reshape(edge_args.seq_len, 1, HEAD_DIM)
+            values = torch.linspace(1.0, 2.0, TOPK, dtype=torch.float32,
+                                    device=case["query"].device).to(case["key"].dtype)
+            for route in range(MTP_WIDTH):
+                case["query"][route, 0, route] = 1
+                begin = route * TOPK
+                flat_key[begin:begin + TOPK, 0, route] = values
+            # Also exercise a legal non-sequential physical block mapping.
+            case["block_table"].copy_(case["block_table"][:, torch.randperm(
+                case["blocks_per_request"], device=case["query"].device)])
+        reference = call_standard(case).reshape(MTP_WIDTH, TOPK)
+        if cache_mode == "balanced":
+            build_balanced_cache(case, reference, edge_args.perf_query_miss_count)
+        elif cache_mode == "all_hit":
+            case["cache_slots"][0, :edge_args.seq_len] = torch.arange(
+                edge_args.seq_len, dtype=torch.int32, device=case["query"].device)
+        # all_miss deliberately retains the initial -1 persistent map.
+        counts = check_case(case, reference, label,
+                            require_slot_zero=cache_mode != "all_miss")
+        if label == "identical_routes" and counts != [TOPK]:
+            raise AssertionError(f"{label}: expected union={TOPK}, actual={counts}")
+        if label == "union_capacity" and counts != [UNION_CAPACITY]:
+            raise AssertionError(
+                f"{label}: expected union={UNION_CAPACITY}, actual={counts}")
+        summaries.append(f"{label}:{counts[0]}")
+
+    # Request-pool indirection: move the logical row away from row 0.
+    edge_args = boundary_args(args, seed=args.seed + 200, seq_len=8192,
+                              cache_tokens=8192, dtype="bf16",
+                              perf_query_miss_count=1)
+    case = make_case(edge_args)
+    reference = call_standard(case).reshape(MTP_WIDTH, TOPK)
+    build_balanced_cache(case, reference, 1)
+    expanded = torch.full((3, edge_args.seq_len), -1, dtype=torch.int32,
+                          device=case["query"].device)
+    expanded[2].copy_(case["cache_slots"][0])
+    case["cache_slots"] = expanded
+    case["req_entries"].fill_(2)
+    counts = check_case(case, reference, "noncontiguous_request_pool", True)
+    summaries.append(f"noncontiguous_request_pool:{counts[0]}")
+    print("FUSED_LI_MANAGE_MTP_BOUNDARY_CHECK " + " ".join(summaries) + " ok=1",
           flush=True)
 
 
@@ -214,6 +362,8 @@ def main() -> None:
     require_local_opapi()
     if not callable(getattr(torch_npu, "npu_lightning_indexer", None)):
         raise RuntimeError("torch_npu.npu_lightning_indexer is unavailable")
+    if not args.skip_boundary_tests:
+        run_boundary_tests(args)
     case = make_case(args)
     reference = call_standard(case).reshape(args.batch_size * MTP_WIDTH, TOPK)
 

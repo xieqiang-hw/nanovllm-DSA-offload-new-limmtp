@@ -179,6 +179,23 @@ python3 ut_ops/test_fused_li_manage_mtp.py --help
 
 ### MTP3 union 目标负载
 
+#### 当前阶段边界测试
+
+性能测试前，脚本默认执行一组小规模、仅检查正确性的边界用例，覆盖当前算子已经实现的
+LI TopK、hit/miss 重排和 unique miss union：
+
+- BF16 与 FP16；
+- 最小合法 `source_len=2048`；
+- 每路 0 miss、1 miss、64 miss，以及每路全部 2048 个 TopK 均 miss；
+- 四路 query 几乎相同和完全不相交两种 union 形态，覆盖 union 恰好达到 8192 容量上限；
+- `cache_tokens` 等于和小于 source 长度的两种预算；
+- 合法 HBM slot 0、随机物理 block 顺序和非连续 request-pool 行号；
+- 动态修改 query 内容后的 ACLGraph replay/eager 一致性；
+- 每个用例均检查 TopK、slot、重排顺序、union ID、`miss_counts` 和 cache 不变性。
+
+当前阶段尚未实现的 eviction、HBM slot 分配、`miss_dst_slots` 最终值和 cache 映射更新不在
+边界测试范围内。只运行性能回归时可传入 `--skip-boundary-tests` 跳过上述矩阵。
+
 当前测试只覆盖算子已经实现的阶段：四路 LI TopK、hit/miss 重排、unique miss union 和
 `cache_slots_pool` 保持不变。测试不会验证 eviction、HBM slot 分配或 cache 映射更新。
 
