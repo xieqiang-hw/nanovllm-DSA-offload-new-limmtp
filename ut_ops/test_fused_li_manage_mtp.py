@@ -276,7 +276,9 @@ def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
             dst = case["miss_dst"][request, :ids.numel()]
             budget = int(case["cache_tokens"][request].item())
             if bool(((dst < 0) | (dst >= budget)).any().item()):
-                raise AssertionError(f"{label}: invalid evict destination slot")
+                raise AssertionError(
+                    f"{label}: invalid evict destination slot: "
+                    f"dst={dst.cpu().tolist()}, budget={budget}, union={ids.cpu().tolist()}")
             if int(torch.unique(dst).numel()) != int(dst.numel()):
                 raise AssertionError(f"{label}: duplicate evict destination slots")
             begin = request * MTP_WIDTH
