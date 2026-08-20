@@ -194,8 +194,8 @@ private:
         uint32_t budget=static_cast<uint32_t>(cacheTokensGm.GetValue(b));
         uint32_t fallbackCursor=begin*CHUNK;
         uint32_t candidateCursor=0U;
-        InitUsedSlotMap(b,work);
         LocalTensor<uint16_t> usedSlots=work.ReinterpretCast<uint16_t>();
+        bool usedSlotMapReady=false;
         for(uint32_t i=0;i<count;++i) {
             int32_t src=-1, slot=-1;
             while(candidateCursor<candidateCap) {
@@ -204,16 +204,29 @@ private:
                 // Valid candidates have score_r < threshold_r for all four
                 // routes, hence -max(score_r-threshold_r) is strictly > 0.
                 // Never decode the payload belonging to an invalid -inf item.
-                if(candidateKey<=0.0F) break;
+                // Keep a small guard band around the TopK threshold. It also
+                // absorbs the low-bit score tagging used for long source IDs.
+                if(candidateKey<=1.0e-6F) break;
                 int32_t candidateSrc=static_cast<int32_t>(bits.GetValue(offset+1U));
                 int32_t candidateSlot=(candidateSrc>=0&&static_cast<uint32_t>(candidateSrc)<actual)?
                     cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+candidateSrc):-1;
                 if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
-                if(static_cast<uint32_t>(candidateSlot)>=CAPACITY||
-                   usedSlots.GetValue(static_cast<uint32_t>(candidateSlot))!=0U) continue;
+                if(static_cast<uint32_t>(candidateSlot)>=CAPACITY) continue;
+                if(usedSlotMapReady&&usedSlots.GetValue(static_cast<uint32_t>(candidateSlot))!=0U) continue;
                 src=candidateSrc; slot=candidateSlot; break;
             }
             if(src<0) {
+                if(!usedSlotMapReady) {
+                    // Match the non-MTP fast path: pay for exact TopK/duplicate
+                    // protection only when sorted threshold candidates run out.
+                    InitUsedSlotMap(b,work);
+                    for(uint32_t prev=0;prev<i;++prev) {
+                        int32_t selected=result.GetValue(CAPACITY+prev);
+                        if(selected>=0&&static_cast<uint32_t>(selected)<CAPACITY)
+                            usedSlots.SetValue(static_cast<uint32_t>(selected),static_cast<uint16_t>(1));
+                    }
+                    usedSlotMapReady=true;
+                }
                 for(uint32_t scanned=0;scanned<actual;++scanned) {
                     uint32_t candidate=fallbackCursor++;
                     if(fallbackCursor>=actual) fallbackCursor=0U;
@@ -225,7 +238,8 @@ private:
                     src=static_cast<int32_t>(candidate); slot=candidateSlot; break;
                 }
             }
-            if(slot>=0) usedSlots.SetValue(static_cast<uint32_t>(slot),static_cast<uint16_t>(1));
+            if(usedSlotMapReady&&slot>=0)
+                usedSlots.SetValue(static_cast<uint32_t>(slot),static_cast<uint16_t>(1));
             result.SetValue(i,src); result.SetValue(CAPACITY+i,slot);
         }
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
