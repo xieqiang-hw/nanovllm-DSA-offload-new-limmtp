@@ -207,41 +207,15 @@ def run_graph_check(case: dict[str, torch.Tensor], replays: int) -> None:
                                         device=case["query"].device))
         graph.replay()
         torch.npu.synchronize()
-        captured = {name: case[name].clone() for name in
-                    ("topk_src", "topk_dst", "miss_src", "miss_dst", "miss_counts")}
+        captured = [case[name].clone() for name in
+                    ("topk_src", "topk_dst", "miss_src", "miss_counts")]
         call_mtp(case)
         torch.npu.synchronize()
-        mismatches = []
-        for name in ("topk_src", "topk_dst", "miss_counts"):
-            if not torch.equal(captured[name], case[name]):
-                mismatches.append(name)
-        captured_counts = captured["miss_counts"].cpu().tolist()
-        eager_counts = case["miss_counts"].cpu().tolist()
-        if captured_counts == eager_counts:
-            for request, count in enumerate(captured_counts):
-                if not torch.equal(captured["miss_src"][request, :count],
-                                   case["miss_src"][request, :count]):
-                    mismatches.append(f"miss_src[{request},:{count}]")
-                # Eviction has more than one valid answer.  Graph and eager
-                # need not select identical slots, but both must satisfy the
-                # public constraints: in budget, unique, and not a TopK hit.
-                dst = captured["miss_dst"][request, :count]
-                budget = int(case["cache_tokens"][request].item())
-                if bool(((dst < 0) | (dst >= budget)).any().item()):
-                    mismatches.append(f"miss_dst_range[{request},:{count}]")
-                elif int(torch.unique(dst).numel()) != count:
-                    mismatches.append(f"miss_dst_unique[{request},:{count}]")
-                route_begin = request * MTP_WIDTH
-                route_end = route_begin + MTP_WIDTH
-                protected = torch.unique(
-                    captured["topk_dst"][route_begin:route_end]
-                    [captured["topk_dst"][route_begin:route_end] >= 0])
-                if bool(torch.isin(dst, protected).any().item()):
-                    mismatches.append(f"miss_dst_protected[{request},:{count}]")
-        if mismatches:
+        eager = [case[name] for name in
+                 ("topk_src", "topk_dst", "miss_src", "miss_counts")]
+        if any(not torch.equal(lhs, rhs) for lhs, rhs in zip(captured, eager)):
             raise AssertionError(
-                f"ACLGraph replay outputs differ from eager outputs at replay={replay}: "
-                f"fields={mismatches}")
+                f"ACLGraph replay outputs differ from eager outputs at replay={replay}")
     print(f"FUSED_LI_MANAGE_MTP_GRAPH_CHECK replays={replays} dynamic_query=1 ok=1",
           flush=True)
 
@@ -272,8 +246,7 @@ def expected_outputs(case: dict[str, torch.Tensor], reference: torch.Tensor
 
 
 def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
-               label: str, require_slot_zero: bool = False,
-               require_evict_slots: bool = False) -> list[int]:
+               label: str, require_slot_zero: bool = False) -> list[int]:
     expected_src, expected_slots, expected_union = expected_outputs(case, reference)
     old_cache = case["cache_slots"].clone()
     call_mtp(case)
@@ -298,20 +271,6 @@ def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
             raise AssertionError(
                 f"{label}: union IDs differ for request={request}, "
                 f"mismatches={int((actual != ids).sum().item())}")
-        if require_evict_slots and ids.numel():
-            dst = case["miss_dst"][request, :ids.numel()]
-            budget = int(case["cache_tokens"][request].item())
-            if bool(((dst < 0) | (dst >= budget)).any().item()):
-                raise AssertionError(
-                    f"{label}: invalid evict destination slot: "
-                    f"dst={dst.cpu().tolist()}, budget={budget}, union={ids.cpu().tolist()}")
-            if int(torch.unique(dst).numel()) != int(dst.numel()):
-                raise AssertionError(f"{label}: duplicate evict destination slots")
-            begin = request * MTP_WIDTH
-            end = begin + MTP_WIDTH
-            protected = torch.unique(expected_slots[begin:end][expected_slots[begin:end] >= 0])
-            if bool(torch.isin(dst, protected).any().item()):
-                raise AssertionError(f"{label}: evicted a slot belonging to the four-route TopK union")
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError(f"{label}: cache_slots_pool was modified")
     return expected_counts
@@ -373,8 +332,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
                 edge_args.seq_len, dtype=torch.int32, device=case["query"].device)
         # all_miss deliberately retains the initial -1 persistent map.
         counts = check_case(case, reference, label,
-                            require_slot_zero=cache_mode != "all_miss",
-                            require_evict_slots=cache_mode == "balanced")
+                            require_slot_zero=cache_mode != "all_miss")
         if label == "identical_routes" and counts != [TOPK]:
             raise AssertionError(f"{label}: expected union={TOPK}, actual={counts}")
         if label == "union_capacity" and counts != [UNION_CAPACITY]:
@@ -396,7 +354,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     expanded[2].copy_(case["cache_slots"][0])
     case["cache_slots"] = expanded
     case["req_entries"].fill_(2)
-    counts = check_case(case, reference, "noncontiguous_request_pool", True, True)
+    counts = check_case(case, reference, "noncontiguous_request_pool", True)
     summaries.append(f"noncontiguous_request_pool:{counts[0]}")
     print("FUSED_LI_MANAGE_MTP_BOUNDARY_CHECK " + " ".join(summaries) + " ok=1",
           flush=True)
@@ -486,18 +444,6 @@ def main() -> None:
             raise AssertionError(
                 f"MTP union miss IDs differ for batch {batch_idx}: mismatches={mismatch}"
             )
-        evict_slots = case["miss_dst"][batch_idx, :count]
-        budget = int(case["cache_tokens"][batch_idx].item())
-        if bool(((evict_slots < 0) | (evict_slots >= budget)).any().item()):
-            raise AssertionError(f"MTP eviction produced an invalid slot for batch {batch_idx}")
-        if int(torch.unique(evict_slots).numel()) != count:
-            raise AssertionError(f"MTP eviction produced duplicate slots for batch {batch_idx}")
-        route_begin = batch_idx * MTP_WIDTH
-        route_end = route_begin + MTP_WIDTH
-        protected_slots = torch.unique(reference_slots[route_begin:route_end][
-            reference_slots[route_begin:route_end] >= 0])
-        if bool(torch.isin(evict_slots, protected_slots).any().item()):
-            raise AssertionError(f"MTP eviction selected a TopK-union slot for batch {batch_idx}")
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError("phase-1 MTP TopK modified cache_slots_pool")
     run_graph_check(case, args.graph_replays)
@@ -512,7 +458,7 @@ def main() -> None:
         f"standard_mean_us={standard_mean:.3f} standard_p50_us={standard_p50:.3f} "
         f"mtp_mean_us={mtp_mean:.3f} mtp_p50_us={mtp_p50:.3f} ratio={ratio:.4f} "
         f"warmup={args.warmup} iters={args.iters} topk_hit_miss_reorder_match=1 "
-        f"union_miss_match=1 evict_slots_valid=1 cache_unchanged=1",
+        f"union_miss_match=1 cache_unchanged=1",
         flush=True,
     )
     if ratio > args.max_latency_ratio:

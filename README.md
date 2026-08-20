@@ -131,8 +131,7 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 `topk_src_ids` 当前保留完整 TopK source ID；`topk_dst_slots` 对 miss 写 `-1`，对 hit 写入
 合法 HBM slot（包括 slot 0）。TopK 随后按“miss 在前、hit 在后，组内 source ID 升序”
 重排。算子使用四指针合并四路有序 miss 前缀，写出升序去重的 `miss_src_ids` 和
-`miss_counts`，并为每个 unique miss 找到可淘汰 HBM slot 写入 `miss_dst_slots`。当前阶段暂不
-更新 cache 映射。
+`miss_counts`。当前阶段暂不执行淘汰或 cache 映射更新；`miss_dst_slots` 仍保留给后续阶段。
 
 测试脚本会完成以下检查：
 
@@ -194,13 +193,11 @@ LI TopK、hit/miss 重排和 unique miss union：
 - 动态修改 query 内容后的 ACLGraph replay/eager 一致性；
 - 每个用例均检查 TopK、slot、重排顺序、union ID、`miss_counts` 和 cache 不变性。
 
-当前阶段尚未实现的 cache 映射更新不在边界测试范围内。只运行性能回归时可传入
-`--skip-boundary-tests` 跳过上述矩阵。
+当前阶段尚未实现的 eviction、HBM slot 分配、`miss_dst_slots` 最终值和 cache 映射更新不在
+边界测试范围内。只运行性能回归时可传入 `--skip-boundary-tests` 跳过上述矩阵。
 
-当前算子覆盖四路 LI TopK、hit/miss 重排、unique miss union，以及为每个 unique miss
-寻找一个可淘汰的 HBM slot。淘汰候选必须已经缓存，并且四路 score 都低于各自 Top2048
-最低分；联合排序 key 使用四路相对阈值的最大值，按 512-token chunk 执行 `Sort32` 和
-`MrgSort`。当前阶段只输出 `miss_dst_slots`，暂不更新 `cache_slots_pool`。
+当前测试只覆盖算子已经实现的阶段：四路 LI TopK、hit/miss 重排、unique miss union 和
+`cache_slots_pool` 保持不变。测试不会验证 eviction、HBM slot 分配或 cache 映射更新。
 
 性能数据使用四路相关 query，并通过 `--perf-query-miss-count` 精确控制每一路 TopK 的 miss 数量。
 `--perf-query-noise` 控制四路 TopK 的重合程度；默认 `0.25` 时要求每个请求的 TopK union 大约为

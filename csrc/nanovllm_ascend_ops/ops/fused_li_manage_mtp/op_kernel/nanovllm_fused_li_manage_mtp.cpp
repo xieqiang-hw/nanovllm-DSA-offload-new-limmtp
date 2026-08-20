@@ -7,7 +7,6 @@
 #include "lib/matmul_intf.h"
 #include "fused_li_manage_mtp_template_tiling_key.h"
 #include "lightning_indexer_kernel.h"
-#include "fused_li_manage_mtp_finalize.h"
 
 using namespace LIKernel;
 
@@ -20,22 +19,9 @@ using namespace LIKernel;
         LI_MTP_COPY_TILING();                                                                                           \
         LIPreload<LIType<__VA_ARGS__, int32_t, true, LI_LAYOUT::BSND, LI_LAYOUT::PA_BSND>> op;                          \
         op.Init(query, key, weights, reqPoolEntries, cacheSlots, nullptr, actualSeqLengths, blockTable,              \
-                topkIndex, topkSlots, missSrcIds, missDstSlots, scoreScratch, thresholdScratch,                       \
+                topkIndex, topkSlots, missSrcIds, missDstSlots,                                                       \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
-        if ASCEND_IS_AIV {                                                                                            \
-            /* All four route TopKs must be globally visible before request finalize. */                              \
-            SyncAll();                                                                                                 \
-            if ((GetBlockIdx() & 1U) == 0U) {                                                                         \
-                tPipe.Reset();                                                                                         \
-                MtpFinalize::MtpMissUnion finalize;                                                                    \
-                finalize.Init(missSrcIds, missDstSlots, topkSlots, actualSeqLengths, scoreScratch,                    \
-                              thresholdScratch, cacheSlots, reqPoolEntries, cacheTokens, topkIndex,                   \
-                              missSrcIds, missDstSlots, nullptr, missCount,                                             \
-                              tiling_data->bSize, tiling_data->cacheSlotsSize, &tPipe);                                \
-                finalize.Process(GetBlockIdx() / 2U, GetBlockNum());                                                   \
-            }                                                                                                          \
-        }                                                                                                              \
     } while (0)
 
 template <int DT>
@@ -46,14 +32,15 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
     __gm__ uint8_t *blockTable, __gm__ uint8_t *topkIndex,
     __gm__ uint8_t *topkSlots, __gm__ uint8_t *missSrcIds,
     __gm__ uint8_t *missDstSlots, __gm__ uint8_t *missCount,
-    __gm__ uint8_t *cacheSlotsOut, __gm__ uint8_t *scoreScratch,
-    __gm__ uint8_t *thresholdScratch, __gm__ uint8_t *workspace,
+    __gm__ uint8_t *cacheSlotsOut, __gm__ uint8_t *workspace,
     __gm__ uint8_t *tiling)
 {
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__CCE_AICORE__ == 200)
 #else
     TPipe tPipe;
+    (void)missCount;
     (void)cacheSlotsOut;
+    (void)cacheTokens;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     if constexpr (DT == LI_MTP_TPL_FP16) {

@@ -38,15 +38,6 @@ static ge::graphStatus InferShapeNanovllmFusedLiManageMtp(gert::InferShapeContex
     missCount->SetDimNum(1);
     missCount->SetDim(0, metadata->GetDim(0));
     *cacheOut = *cache;
-    gert::Shape *scores = context->GetOutputShape(6);
-    gert::Shape *thresholds = context->GetOutputShape(7);
-    OPS_LOG_E_IF_NULL(context, scores, return ge::GRAPH_FAILED);
-    OPS_LOG_E_IF_NULL(context, thresholds, return ge::GRAPH_FAILED);
-    scores->SetDimNum(2);
-    scores->SetDim(0, query->GetDim(0));
-    scores->SetDim(1, cache->GetDim(1));
-    thresholds->SetDimNum(1);
-    thresholds->SetDim(0, query->GetDim(0));
     return ge::GRAPH_SUCCESS;
 }
 
@@ -57,8 +48,6 @@ static ge::graphStatus InferDataTypeNanovllmFusedLiManageMtp(gert::InferDataType
     for (uint32_t out = 0; out < 6; ++out) {
         context->SetOutputDataType(out, ge::DT_INT32);
     }
-    context->SetOutputDataType(6, ge::DT_FLOAT);
-    context->SetOutputDataType(7, ge::DT_FLOAT);
     return ge::GRAPH_SUCCESS;
 }
 

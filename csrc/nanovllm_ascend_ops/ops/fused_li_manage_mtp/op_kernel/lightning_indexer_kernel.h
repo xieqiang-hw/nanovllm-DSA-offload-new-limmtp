@@ -59,7 +59,6 @@ public:
                                 __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                 __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
                                 __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1,
-                                __gm__ uint8_t *scoreScratch, __gm__ uint8_t *thresholdScratch,
                                 __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling, TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -386,7 +385,6 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
                                             __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                             __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
                                             __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1,
-                                            __gm__ uint8_t *scoreScratch, __gm__ uint8_t *thresholdScratch,
                                             __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling,
                                             TPipe *tPipe)
 {
@@ -436,7 +434,7 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
         weightsGm.SetGlobalBuffer((__gm__ K_T *)weights);
         vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, vec1ParamGm, weightsGm, indiceOutGm, valueOutGm,
                                            reqPoolEntriesGm, cacheSlotsGm, slotOutGm,
-                                           unionPair0, unionPair1, scoreScratch, thresholdScratch);
+                                           unionPair0, unionPair1);
     } else {
         matmulService.InitParams(constInfo);
         queryGm.SetGlobalBuffer((__gm__ Q_T *)query);
