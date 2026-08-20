@@ -239,6 +239,7 @@ op_add_subdirectory(OP_LIST OP_DIR_LIST)
 # names.  The aliases are also used to install the generated dynamic Python and
 # to include the kernels in binary_info_config.json.
 set(fused_li_manage_kernel_aliases nanovllm_fused_li_manage)
+set(fused_li_manage_mtp_kernel_aliases nanovllm_fused_li_manage_mtp)
 
 foreach (OP_DIR ${OP_DIR_LIST})
     get_filename_component(_op_name "${OP_DIR}" NAME)
