@@ -71,6 +71,7 @@ private:
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
             DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], result,
                         {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
+            SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
         countsGm.SetValue(b, static_cast<int32_t>(count));
     }
