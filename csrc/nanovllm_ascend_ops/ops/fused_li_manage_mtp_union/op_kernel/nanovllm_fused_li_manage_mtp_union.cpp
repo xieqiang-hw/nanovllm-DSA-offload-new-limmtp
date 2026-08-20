@@ -26,6 +26,7 @@ public:
         pipe->InitBuffer(idsBuf, CAPACITY * sizeof(int32_t));
         pipe->InitBuffer(outBuf, CAPACITY * sizeof(int32_t));
         pipe->InitBuffer(slotsBuf, TOPK * sizeof(int32_t));
+        pipe->InitBuffer(countBuf, 32U);
     }
     __aicore__ inline void Process()
     {
@@ -37,6 +38,7 @@ private:
         LocalTensor<int32_t> ids = idsBuf.Get<int32_t>();
         LocalTensor<int32_t> result = outBuf.Get<int32_t>();
         LocalTensor<int32_t> slots = slotsBuf.Get<int32_t>();
+        LocalTensor<int32_t> countLocal = countBuf.Get<int32_t>();
         uint32_t lengths[ROUTES] = {0U, 0U, 0U, 0U};
         uint32_t positions[ROUTES] = {0U, 0U, 0U, 0U};
         for (uint32_t r = 0; r < ROUTES; ++r) {
@@ -53,18 +55,23 @@ private:
         SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
         uint32_t count = 0U;
         int32_t last = -1;
+        int32_t heads[ROUTES] = {INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX};
+        for (uint32_t r = 0; r < ROUTES; ++r) {
+            if (lengths[r] != 0U) heads[r] = ids.GetValue(r * TOPK);
+        }
         while (positions[0] < lengths[0] || positions[1] < lengths[1] ||
                positions[2] < lengths[2] || positions[3] < lengths[3]) {
             int32_t next = INT32_MAX;
             for (uint32_t r = 0; r < ROUTES; ++r) {
-                if (positions[r] < lengths[r]) {
-                    int32_t value = ids.GetValue(r * TOPK + positions[r]);
-                    next = value < next ? value : next;
-                }
+                next = heads[r] < next ? heads[r] : next;
             }
             if (next != last) { result.SetValue(count++, next); last = next; }
             for (uint32_t r = 0; r < ROUTES; ++r) {
-                while (positions[r] < lengths[r] && ids.GetValue(r * TOPK + positions[r]) == next) ++positions[r];
+                if (heads[r] == next) {
+                    ++positions[r];
+                    heads[r] = positions[r] < lengths[r]
+                        ? ids.GetValue(r * TOPK + positions[r]) : INT32_MAX;
+                }
             }
         }
         if (count != 0U) {
@@ -73,10 +80,12 @@ private:
                         {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
             SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
-        countsGm.SetValue(b, static_cast<int32_t>(count));
+        countLocal.SetValue(0, static_cast<int32_t>(count));
+        SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+        DataCopyPad(countsGm[b], countLocal, {1, static_cast<uint16_t>(sizeof(int32_t)), 0, 0});
     }
     GlobalTensor<int32_t> idsGm, slotsGm, outGm, countsGm;
-    TBuf<TPosition::VECCALC> idsBuf, outBuf, slotsBuf;
+    TBuf<TPosition::VECCALC> idsBuf, outBuf, slotsBuf, countBuf;
     uint32_t batchSize = 0U;
 };
 }
