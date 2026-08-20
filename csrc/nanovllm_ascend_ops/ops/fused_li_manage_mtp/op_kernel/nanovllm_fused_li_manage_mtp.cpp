@@ -54,6 +54,7 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
             missCountGm.SetGlobalBuffer((__gm__ int32_t *)missCount);
             AscendC::InitGlobalMemory(missCountGm, batchSize, 0);
         }
+        SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
     }
 }
 
