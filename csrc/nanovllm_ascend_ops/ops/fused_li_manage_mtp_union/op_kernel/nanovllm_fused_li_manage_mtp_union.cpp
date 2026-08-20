@@ -101,22 +101,22 @@ private:
         return count;
     }
 
-    __aicore__ inline bool ContainsSorted(uint64_t base,uint32_t begin,uint32_t end,int32_t id) {
-        while(begin<end) {
-            uint32_t mid=begin+(end-begin)/2U;
-            int32_t value=topkSrcGm.GetValue(base+mid);
-            if(value<id) begin=mid+1U; else end=mid;
-        }
-        return begin<TOPK&&topkSrcGm.GetValue(base+begin)==id;
-    }
-
-    __aicore__ inline bool IsProtectedTopk(uint32_t b,int32_t id) {
+    __aicore__ inline void InitUsedSlotMap(uint32_t b,LocalTensor<float> work) {
+        LocalTensor<uint8_t> used=work.ReinterpretCast<uint8_t>();
+        LocalTensor<int32_t> chunk=work[CAPACITY/4U].ReinterpretCast<int32_t>();
+        Duplicate(used,static_cast<uint8_t>(0),CAPACITY); PipeBarrier<PIPE_V>();
         for(uint32_t r=0;r<ROUTES;++r) {
             uint64_t base=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
-            if(ContainsSorted(base,0U,missLen[r],id)||
-               ContainsSorted(base,missLen[r],TOPK,id)) return true;
+            for(uint32_t off=0;off<TOPK;off+=CHUNK) {
+                DataCopy(chunk,slotsGm[base+off],CHUNK);
+                Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+                for(uint32_t i=0;i<CHUNK;++i) {
+                    int32_t slot=chunk.GetValue(i);
+                    if(slot>=0&&static_cast<uint32_t>(slot)<CAPACITY)
+                        used.SetValue(static_cast<uint32_t>(slot),static_cast<uint8_t>(1));
+                }
+            }
         }
-        return false;
     }
 
     __aicore__ inline void BuildEvictChunk(uint32_t b,uint32_t row,uint32_t start,uint32_t valid,
@@ -192,6 +192,8 @@ private:
         uint32_t budget=static_cast<uint32_t>(cacheTokensGm.GetValue(b));
         uint32_t fallbackCursor=begin*CHUNK;
         uint32_t candidateCursor=0U;
+        InitUsedSlotMap(b,work);
+        LocalTensor<uint8_t> usedSlots=work.ReinterpretCast<uint8_t>();
         for(uint32_t i=0;i<count;++i) {
             int32_t src=-1, slot=-1;
             while(candidateCursor<candidateCap) {
@@ -205,16 +207,10 @@ private:
                 int32_t candidateSlot=(candidateSrc>=0&&static_cast<uint32_t>(candidateSrc)<actual)?
                     cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+candidateSrc):-1;
                 if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
-                // Thresholds provide the vector fast filter.  Keep one final
-                // exact guard for threshold ties/rounding at the TopK edge.
-                if(IsProtectedTopk(b,candidateSrc)) continue;
+                if(static_cast<uint32_t>(candidateSlot)>=CAPACITY||
+                   usedSlots.GetValue(static_cast<uint32_t>(candidateSlot))!=0U) continue;
                 src=candidateSrc; slot=candidateSlot; break;
             }
-            // BuildEvictChunk already applies all four strict TopK thresholds.
-            // Consequently a sorted fast-path candidate cannot belong to any
-            // route's TopK.  Source IDs are unique by construction and the
-            // persistent mapping owns each logical slot once, so avoid the
-            // former O(count^2) scalar duplicate/protection validation here.
             if(src<0) {
                 for(uint32_t scanned=0;scanned<actual;++scanned) {
                     uint32_t candidate=fallbackCursor++;
@@ -222,13 +218,12 @@ private:
                     int32_t candidateSlot=cacheSlotsGm.GetValue(
                         static_cast<uint64_t>(row)*sourceCapacity+candidate);
                     if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
-                    if(IsProtectedTopk(b,static_cast<int32_t>(candidate))) continue;
-                    // fallbackCursor advances monotonically, so source IDs do
-                    // not repeat. cache_slots_pool is a one-to-one persistent
-                    // mapping, therefore its valid logical slots do not repeat.
+                    if(static_cast<uint32_t>(candidateSlot)>=CAPACITY||
+                       usedSlots.GetValue(static_cast<uint32_t>(candidateSlot))!=0U) continue;
                     src=static_cast<int32_t>(candidate); slot=candidateSlot; break;
                 }
             }
+            if(slot>=0) usedSlots.SetValue(static_cast<uint32_t>(slot),static_cast<uint8_t>(1));
             result.SetValue(i,src); result.SetValue(CAPACITY+i,slot);
         }
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
