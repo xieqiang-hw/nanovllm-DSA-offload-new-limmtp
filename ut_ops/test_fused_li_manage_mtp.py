@@ -302,6 +302,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     )
     summaries = []
     for index, (label, overrides, cache_mode) in enumerate(cases):
+        print(f"FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN case={label}", flush=True)
         edge_args = boundary_args(args, seed=args.seed + 100 + index, **overrides)
         case = make_case(edge_args)
         if label == "identical_routes":
@@ -340,6 +341,8 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
         summaries.append(f"{label}:{counts[0]}")
 
     # Request-pool indirection: move the logical row away from row 0.
+    print("FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN case=noncontiguous_request_pool",
+          flush=True)
     edge_args = boundary_args(args, seed=args.seed + 200, seq_len=8192,
                               cache_tokens=8192, dtype="bf16",
                               perf_query_miss_count=1)

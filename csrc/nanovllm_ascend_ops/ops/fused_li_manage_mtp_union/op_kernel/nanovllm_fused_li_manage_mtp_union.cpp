@@ -41,6 +41,13 @@ private:
             DataCopy(slots,slotsGm[base],TOPK); Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
             while(len[r]<TOPK && slots.GetValue(len[r])<0) ++len[r];
         }
+        uint32_t total=len[0]+len[1]+len[2]+len[3];
+        if(total==0U) {
+            countLocal.SetValue(0,0);
+            Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+            DataCopyPad(countsGm[b],countLocal,{1,static_cast<uint16_t>(sizeof(int32_t)),0,0});
+            return;
+        }
         uint64_t base=static_cast<uint64_t>(b)*CAPACITY;
         DataCopy(input,pair0Gm[base],CAPACITY);
         DataCopy(input[CAPACITY],pair1Gm[base],CAPACITY);
@@ -48,12 +55,15 @@ private:
         MrgSort4Info p;
         p.elementLengths[0]=len[0]; p.elementLengths[1]=len[1];
         p.elementLengths[2]=len[2]; p.elementLengths[3]=len[3];
-        p.ifExhaustedSuspension=false; p.validBit=0b1111; p.repeatTimes=1;
+        p.ifExhaustedSuspension=false;
+        p.validBit=(len[0]>0U?0b0001:0U)|(len[1]>0U?0b0010:0U)|
+                   (len[2]>0U?0b0100:0U)|(len[3]>0U?0b1000:0U);
+        p.repeatTimes=1;
         MrgSortSrcList<float> src;
         src.src1=input; src.src2=input[PAIR_WORDS];
         src.src3=input[PAIR_WORDS*2U]; src.src4=input[PAIR_WORDS*3U];
         MrgSort<float>(merged,src,p); Sync<HardEvent::V_S>(HardEvent::V_S);
-        uint32_t total=len[0]+len[1]+len[2]+len[3], count=0U;
+        uint32_t count=0U;
         uint32_t mask=candidatesGm.GetValue(b)>static_cast<int32_t>(SHORT_MASK+1U)?LONG_MASK:SHORT_MASK;
         int32_t last=-1; LocalTensor<uint32_t> bits=merged.ReinterpretCast<uint32_t>();
         for(uint32_t i=0;i<total;++i) {
