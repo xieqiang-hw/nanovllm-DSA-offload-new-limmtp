@@ -33,11 +33,11 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
 #define INVOKE_LI_MTP_TOPK(...)                                                                                        \
     do {                                                                                                               \
         LI_MTP_COPY_TILING();                                                                                           \
-        InitMtpPlaceholderOutputs(topkSlots, missCount, tiling_data->bSize);                                            \
         LIPreload<LIType<__VA_ARGS__, int32_t, true, LI_LAYOUT::BSND, LI_LAYOUT::PA_BSND>> op;                          \
         op.Init(query, key, weights, nullptr, actualSeqLengths, blockTable, topkIndex, topkSlots,                      \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
+        InitMtpPlaceholderOutputs(topkSlots, missCount, tiling_data->bSize);                                            \
     } while (0)
 
 template <int DT>

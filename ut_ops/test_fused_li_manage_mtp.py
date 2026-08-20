@@ -58,7 +58,7 @@ def make_case(args: argparse.Namespace) -> dict[str, torch.Tensor]:
     topk_src = torch.full((batch * MTP_WIDTH, 1, TOPK), -1, dtype=torch.int32, device=device)
     topk_dst = torch.full(topk_src.shape, -7, dtype=torch.int32, device=device)
     miss_src = torch.full((batch, UNION_CAPACITY), -1, dtype=torch.int32, device=device)
-    miss_dst = torch.full_like(miss_src, -1)
+    miss_dst = torch.full(miss_src.shape, -1, dtype=torch.int32, device=device)
     miss_counts = torch.full((batch,), -1, dtype=torch.int32, device=device)
     # TND standard-LI convention: cumulative query lengths for B sequences.
     query_lens = torch.arange(MTP_WIDTH, batch * MTP_WIDTH + 1, MTP_WIDTH,
@@ -124,8 +124,13 @@ def main() -> None:
         raise AssertionError(f"MTP TopK differs from standard LightningIndexer: mismatched_positions={mismatch}")
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError("phase-1 MTP TopK modified cache_slots_pool")
-    if bool((case["topk_dst"] != -1).any()) or bool((case["miss_counts"] != 0).any()):
-        raise AssertionError("phase-1 placeholder outputs are invalid")
+    invalid_slots = int((case["topk_dst"] != -1).sum().item())
+    invalid_counts = int((case["miss_counts"] != 0).sum().item())
+    if invalid_slots or invalid_counts:
+        raise AssertionError(
+            "phase-1 placeholder outputs are invalid: "
+            f"invalid_topk_slots={invalid_slots}, invalid_miss_counts={invalid_counts}"
+        )
 
     standard_mean, standard_p50 = benchmark(lambda: call_standard(case), args.warmup, args.iters)
     mtp_mean, mtp_p50 = benchmark(lambda: call_mtp(case), args.warmup, args.iters)
