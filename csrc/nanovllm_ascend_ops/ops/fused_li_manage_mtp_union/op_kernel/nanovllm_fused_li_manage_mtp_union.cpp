@@ -191,18 +191,27 @@ private:
         LocalTensor<uint32_t> bits=acc.ReinterpretCast<uint32_t>();
         uint32_t budget=static_cast<uint32_t>(cacheTokensGm.GetValue(b));
         uint32_t fallbackCursor=begin*CHUNK;
+        uint32_t candidateCursor=0U;
         for(uint32_t i=0;i<count;++i) {
-            int32_t src=static_cast<int32_t>(bits.GetValue(i*2U+1U));
-            int32_t slot=(src>=0&&static_cast<uint32_t>(src)<actual)?
-                         cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+src):-1;
+            int32_t src=-1, slot=-1;
+            while(candidateCursor<candidateCap) {
+                uint32_t offset=candidateCursor++*2U;
+                float candidateKey=acc.GetValue(offset);
+                // Valid candidates have score_r < threshold_r for all four
+                // routes, hence -max(score_r-threshold_r) is strictly > 0.
+                // Never decode the payload belonging to an invalid -inf item.
+                if(candidateKey<=0.0F) break;
+                int32_t candidateSrc=static_cast<int32_t>(bits.GetValue(offset+1U));
+                int32_t candidateSlot=(candidateSrc>=0&&static_cast<uint32_t>(candidateSrc)<actual)?
+                    cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+candidateSrc):-1;
+                if(candidateSlot<0||static_cast<uint32_t>(candidateSlot)>=budget) continue;
+                src=candidateSrc; slot=candidateSlot; break;
+            }
             // BuildEvictChunk already applies all four strict TopK thresholds.
             // Consequently a sorted fast-path candidate cannot belong to any
             // route's TopK.  Source IDs are unique by construction and the
             // persistent mapping owns each logical slot once, so avoid the
             // former O(count^2) scalar duplicate/protection validation here.
-            if(slot<0||static_cast<uint32_t>(slot)>=budget) {
-                src=-1; slot=-1;
-            }
             if(src<0) {
                 for(uint32_t scanned=0;scanned<actual;++scanned) {
                     uint32_t candidate=fallbackCursor++;

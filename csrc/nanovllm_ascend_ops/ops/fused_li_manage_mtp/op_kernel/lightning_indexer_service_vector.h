@@ -528,8 +528,10 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             LIServiceVec::DoReduce(reduceCacheBuf[REDUCE_BANK_CONFLICT_NUM], reduceOutInner, gRedCnt, s2BaseSize_);
             outQueue_.FreeTensor(reduceCacheBuf);
 
-            uint64_t scoreOffset = (static_cast<uint64_t>(info.bN2Idx) * 4U +
-                                    static_cast<uint32_t>(cuS1Idx)) * cacheSlotsSize_ +
+            uint64_t outputRow = static_cast<uint64_t>(info.indiceOutOffset) /
+                                     static_cast<uint64_t>(constInfo_.sparseCount) +
+                                 static_cast<uint32_t>(cuS1Idx);
+            uint64_t scoreOffset = outputRow * cacheSlotsSize_ +
                                    static_cast<uint32_t>(cuBaseS2Idx);
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             LIServiceVec::CopyOut(scoreScratchGm[scoreOffset], reduceOutInner, cuS2Len);
@@ -593,7 +595,7 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             if (needCopyOutGm) {
                 if (!constInfo_.returnValue) {
                     thresholdScratchGm.SetValue(
-                        static_cast<uint64_t>(info.bN2Idx) * 4U + static_cast<uint32_t>(cuS1Idx),
+                        outputRow,
                         globalTopkUb_[innerS1Idx * BASE_TOPK * 2].GetValue((BASE_TOPK - 1U) * 2U));
                     LocalTensor<float> valueULocal = outQueue_.AllocTensor<float>();
                     SortTopkBySlotIndex(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], valueULocal,
