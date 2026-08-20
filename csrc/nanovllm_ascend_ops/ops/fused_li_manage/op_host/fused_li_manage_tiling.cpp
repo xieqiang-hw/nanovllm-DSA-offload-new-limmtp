@@ -64,10 +64,18 @@ ge::graphStatus FusedLiManageTiling::GetTensorInfo(FusedLiManageTilingInfo &tili
     op.topkIndexOut.shape = context_->GetOutputShape(TOPK_INDEX);
     op.topkSlotsOut.desc = context_->GetOutputDesc(TOPK_SLOTS_INDEX);
     op.topkSlotsOut.shape = context_->GetOutputShape(TOPK_SLOTS_INDEX);
-    op.missCountOut.desc = context_->GetOutputDesc(MISS_COUNT_INDEX);
-    op.missCountOut.shape = context_->GetOutputShape(MISS_COUNT_INDEX);
-    op.cacheSlotsOut.desc = context_->GetOutputDesc(CACHE_SLOTS_OUT_INDEX);
-    op.cacheSlotsOut.shape = context_->GetOutputShape(CACHE_SLOTS_OUT_INDEX);
+    uint32_t missCountIndex = mtp_ ? 4U : MISS_COUNT_INDEX;
+    uint32_t cacheSlotsOutIndex = mtp_ ? 5U : CACHE_SLOTS_OUT_INDEX;
+    if (mtp_) {
+        op.missSrcOut.desc = context_->GetOutputDesc(2U);
+        op.missSrcOut.shape = context_->GetOutputShape(2U);
+        op.missSlotsOut.desc = context_->GetOutputDesc(3U);
+        op.missSlotsOut.shape = context_->GetOutputShape(3U);
+    }
+    op.missCountOut.desc = context_->GetOutputDesc(missCountIndex);
+    op.missCountOut.shape = context_->GetOutputShape(missCountIndex);
+    op.cacheSlotsOut.desc = context_->GetOutputDesc(cacheSlotsOutIndex);
+    op.cacheSlotsOut.shape = context_->GetOutputShape(cacheSlotsOutIndex);
 
     OPS_ERR_IF(op.query.desc == nullptr || op.query.shape == nullptr,
                OPS_LOG_E(tilingInfo.opName, "query desc/shape is nullptr."), return ge::GRAPH_FAILED);
@@ -94,6 +102,10 @@ ge::graphStatus FusedLiManageTiling::GetTensorInfo(FusedLiManageTilingInfo &tili
                OPS_LOG_E(tilingInfo.opName, "miss_count desc/shape is nullptr."), return ge::GRAPH_FAILED);
     OPS_ERR_IF(op.cacheSlotsOut.desc == nullptr || op.cacheSlotsOut.shape == nullptr,
                OPS_LOG_E(tilingInfo.opName, "cache_slots output desc/shape is nullptr."),
+               return ge::GRAPH_FAILED);
+    OPS_ERR_IF(mtp_ && (op.missSrcOut.desc == nullptr || op.missSrcOut.shape == nullptr ||
+                        op.missSlotsOut.desc == nullptr || op.missSlotsOut.shape == nullptr),
+               OPS_LOG_E(tilingInfo.opName, "MTP union miss outputs are nullptr."),
                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -123,7 +135,9 @@ ge::graphStatus FusedLiManageTiling::CheckDtype(const FusedLiManageTilingInfo &t
     OPS_ERR_IF(op.topkIndexOut.desc->GetDataType() != ge::DT_INT32 ||
                    op.topkSlotsOut.desc->GetDataType() != ge::DT_INT32 ||
                    op.missCountOut.desc->GetDataType() != ge::DT_INT32 ||
-                   op.cacheSlotsOut.desc->GetDataType() != ge::DT_INT32,
+                    op.cacheSlotsOut.desc->GetDataType() != ge::DT_INT32 ||
+                    (mtp_ && (op.missSrcOut.desc->GetDataType() != ge::DT_INT32 ||
+                              op.missSlotsOut.desc->GetDataType() != ge::DT_INT32)),
                OPS_LOG_E(tilingInfo.opName,
                          "topk_index/topk_slots/miss_count/cache_slots output must be int32."),
                return ge::GRAPH_FAILED);
@@ -145,6 +159,8 @@ ge::graphStatus FusedLiManageTiling::CheckShape(FusedLiManageTilingInfo &tilingI
     const auto &slotsOutShape = op.topkSlotsOut.shape->GetStorageShape();
     const auto &missCountOutShape = op.missCountOut.shape->GetStorageShape();
     const auto &cacheSlotsOutShape = op.cacheSlotsOut.shape->GetStorageShape();
+    const auto *missSrcShape = mtp_ ? &op.missSrcOut.shape->GetStorageShape() : nullptr;
+    const auto *missSlotsShape = mtp_ ? &op.missSlotsOut.shape->GetStorageShape() : nullptr;
 
     OPS_ERR_IF(qShape.GetDimNum() != DIM_NUM_THREE,
                OPS_LOG_E(tilingInfo.opName, "query must be TND [B, N1, 128], where N1 is 32 or 64."),
@@ -174,6 +190,10 @@ ge::graphStatus FusedLiManageTiling::CheckShape(FusedLiManageTilingInfo &tilingI
     OPS_ERR_IF(cacheSlotsOutShape.GetDimNum() != DIM_NUM_TWO,
                OPS_LOG_E(tilingInfo.opName, "cache_slots output must be rank 2."),
                return ge::GRAPH_FAILED);
+    OPS_ERR_IF(mtp_ && (missSrcShape->GetDimNum() != DIM_NUM_TWO ||
+                        missSlotsShape->GetDimNum() != DIM_NUM_TWO),
+               OPS_LOG_E(tilingInfo.opName, "MTP miss outputs must be [B, 8192]."),
+               return ge::GRAPH_FAILED);
 
     tilingInfo.bSize = static_cast<uint32_t>(qShape.GetDim(0));
     tilingInfo.n1Size = static_cast<uint32_t>(qShape.GetDim(1));
@@ -186,9 +206,11 @@ ge::graphStatus FusedLiManageTiling::CheckShape(FusedLiManageTilingInfo &tilingI
 
     OPS_ERR_IF(tilingInfo.bSize == 0, OPS_LOG_E(tilingInfo.opName, "batch size must be > 0."),
                return ge::GRAPH_FAILED);
-    OPS_ERR_IF(reqPoolShape.GetShapeSize() != tilingInfo.bSize ||
-                   cacheTokensShape.GetShapeSize() != tilingInfo.bSize ||
-                   seqShape.GetShapeSize() != tilingInfo.bSize || blockShape.GetDim(0) != tilingInfo.bSize,
+    uint32_t metadataBatch = mtp_ ? tilingInfo.bSize / 4U : tilingInfo.bSize;
+    OPS_ERR_IF((mtp_ && (tilingInfo.bSize % 4U != 0U)) ||
+                    reqPoolShape.GetShapeSize() != metadataBatch ||
+                    cacheTokensShape.GetShapeSize() != metadataBatch ||
+                    seqShape.GetShapeSize() != metadataBatch || blockShape.GetDim(0) != metadataBatch,
                OPS_LOG_E(tilingInfo.opName,
                          "query batch, req_pool_entries, cache_tokens, sequence lengths, and block_table batch must match."),
                return ge::GRAPH_FAILED);
@@ -226,8 +248,12 @@ ge::graphStatus FusedLiManageTiling::CheckShape(FusedLiManageTilingInfo &tilingI
                     slotsOutShape.GetDim(2) != DECODE_OUTPUT_CAPACITY,
                OPS_LOG_E(tilingInfo.opName, "topk_index/topk_slots must have shape [B, 1, 2048]."),
                return ge::GRAPH_FAILED);
-    OPS_ERR_IF(missCountOutShape.GetDim(0) != tilingInfo.bSize,
+    OPS_ERR_IF(missCountOutShape.GetDim(0) != metadataBatch,
                OPS_LOG_E(tilingInfo.opName, "miss_count must have shape [B]."),
+                return ge::GRAPH_FAILED);
+    OPS_ERR_IF(mtp_ && (missSrcShape->GetDim(0) != metadataBatch || missSrcShape->GetDim(1) != 8192 ||
+                        missSlotsShape->GetDim(0) != metadataBatch || missSlotsShape->GetDim(1) != 8192),
+               OPS_LOG_E(tilingInfo.opName, "MTP miss outputs must have shape [B, 8192]."),
                return ge::GRAPH_FAILED);
     OPS_ERR_IF(cacheSlotsOutShape.GetDim(0) != cacheShape.GetDim(0) ||
                    cacheSlotsOutShape.GetDim(1) != cacheShape.GetDim(1),
@@ -320,4 +346,3 @@ IMPL_OP_OPTILING(NanovllmFusedLiManage)
     .TilingParse<FusedLiManageCompileInfo>(TilingPrepareForNanovllmFusedLiManage);
 
 } // namespace optiling
-

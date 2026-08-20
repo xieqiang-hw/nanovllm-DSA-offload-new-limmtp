@@ -1,0 +1,149 @@
+"""Correctness and latency comparison for the phase-1 MTP4 LI TopK op."""
+
+from __future__ import annotations
+
+import argparse
+import statistics
+
+import torch
+import torch_npu
+
+import nanovllm.ops  # noqa: F401 - loads torch custom-op registrations
+from _op_utils import require_local_opapi
+
+
+MTP_WIDTH = 4
+HEADS = 32
+HEAD_DIM = 128
+BLOCK_SIZE = 128
+TOPK = 2048
+UNION_CAPACITY = MTP_WIDTH * TOPK
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", default="npu:0")
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--seq-len", type=int, default=65536)
+    parser.add_argument("--cache-tokens", type=int, default=8192)
+    parser.add_argument("--dtype", choices=("bf16", "fp16"), default="bf16")
+    parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--iters", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--max-latency-ratio", type=float, default=2.0)
+    return parser.parse_args()
+
+
+def make_case(args: argparse.Namespace) -> dict[str, torch.Tensor]:
+    if args.seq_len < TOPK or args.seq_len % BLOCK_SIZE:
+        raise ValueError("--seq-len must be a multiple of 128 and >= 2048")
+    if args.cache_tokens < TOPK or args.cache_tokens > args.seq_len:
+        raise ValueError("--cache-tokens must be in [2048, seq_len]")
+    device = torch.device(args.device)
+    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+    torch.manual_seed(args.seed)
+    torch.npu.manual_seed(args.seed)
+    batch = args.batch_size
+    blocks_per_request = args.seq_len // BLOCK_SIZE
+    total_blocks = batch * blocks_per_request
+
+    query = torch.randn(batch * MTP_WIDTH, HEADS, HEAD_DIM, dtype=dtype, device=device)
+    weights = torch.randn(batch * MTP_WIDTH, HEADS, dtype=dtype, device=device)
+    key = torch.randn(total_blocks, BLOCK_SIZE, 1, HEAD_DIM, dtype=dtype, device=device)
+    block_table = torch.arange(total_blocks, dtype=torch.int32, device=device).view(batch, blocks_per_request)
+    candidate_lens = torch.full((batch,), args.seq_len, dtype=torch.int32, device=device)
+    cache_tokens = torch.full((batch,), args.cache_tokens, dtype=torch.int32, device=device)
+    req_entries = torch.arange(batch, dtype=torch.int32, device=device)
+    cache_slots = torch.full((batch, args.seq_len), -1, dtype=torch.int32, device=device)
+    topk_src = torch.full((batch * MTP_WIDTH, 1, TOPK), -1, dtype=torch.int32, device=device)
+    topk_dst = torch.full_like(topk_src, -7)
+    miss_src = torch.full((batch, UNION_CAPACITY), -1, dtype=torch.int32, device=device)
+    miss_dst = torch.full_like(miss_src, -1)
+    miss_counts = torch.full((batch,), -1, dtype=torch.int32, device=device)
+    # TND standard-LI convention: cumulative query lengths for B sequences.
+    query_lens = torch.arange(MTP_WIDTH, batch * MTP_WIDTH + 1, MTP_WIDTH,
+                              dtype=torch.int32, device=device)
+    return locals()
+
+
+def call_standard(case: dict[str, torch.Tensor]) -> torch.Tensor:
+    out = torch_npu.npu_lightning_indexer(
+        query=case["query"], key=case["key"], weights=case["weights"],
+        actual_seq_lengths_query=case["query_lens"],
+        actual_seq_lengths_key=case["candidate_lens"],
+        block_table=case["block_table"], layout_query="TND",
+        # The custom interface defines num_candidate_tokens as the same
+        # prefill full-block range for all four MTP routes, so compare the
+        # unmasked LI score/TopK semantics rather than right-down causal S1.
+        layout_key="PA_BSND", sparse_count=TOPK, sparse_mode=0,
+    )
+    return out[0] if isinstance(out, (tuple, list)) else out
+
+
+def call_mtp(case: dict[str, torch.Tensor]) -> None:
+    torch.ops.nanovllm_dsa.fused_li_manage_mtp.default(
+        case["query"], case["weights"], case["key"], case["block_table"],
+        case["candidate_lens"], case["cache_tokens"], case["req_entries"],
+        case["cache_slots"], case["topk_src"], case["topk_dst"],
+        case["miss_src"], case["miss_dst"], case["miss_counts"],
+    )
+
+
+def benchmark(fn, warmup: int, iters: int) -> tuple[float, float]:
+    for _ in range(warmup):
+        fn()
+    torch.npu.synchronize()
+    samples = []
+    for _ in range(iters):
+        start = torch.npu.Event(enable_timing=True)
+        end = torch.npu.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        end.synchronize()
+        samples.append(float(start.elapsed_time(end)) * 1000.0)
+    return statistics.mean(samples), statistics.median(samples)
+
+
+def main() -> None:
+    args = parse_args()
+    require_local_opapi()
+    if not callable(getattr(torch_npu, "npu_lightning_indexer", None)):
+        raise RuntimeError("torch_npu.npu_lightning_indexer is unavailable")
+    case = make_case(args)
+    old_cache = case["cache_slots"].clone()
+    reference = call_standard(case).reshape(args.batch_size * MTP_WIDTH, TOPK)
+    call_mtp(case)
+    torch.npu.synchronize()
+
+    actual = case["topk_src"].reshape(args.batch_size * MTP_WIDTH, TOPK)
+    ref_sorted = torch.sort(reference, dim=-1).values
+    actual_sorted = torch.sort(actual, dim=-1).values
+    mismatch = int((ref_sorted != actual_sorted).sum().item())
+    if mismatch:
+        raise AssertionError(f"MTP TopK differs from standard LightningIndexer: mismatched_positions={mismatch}")
+    if not torch.equal(case["cache_slots"], old_cache):
+        raise AssertionError("phase-1 MTP TopK modified cache_slots_pool")
+    if bool((case["topk_dst"] != -1).any()) or bool((case["miss_counts"] != 0).any()):
+        raise AssertionError("phase-1 placeholder outputs are invalid")
+
+    standard_mean, standard_p50 = benchmark(lambda: call_standard(case), args.warmup, args.iters)
+    mtp_mean, mtp_p50 = benchmark(lambda: call_mtp(case), args.warmup, args.iters)
+    ratio = mtp_mean / standard_mean
+    print(
+        "FUSED_LI_MANAGE_MTP_RESULT "
+        f"batch={args.batch_size} routes=4 seq_len={args.seq_len} dtype={args.dtype} "
+        f"standard_mean_us={standard_mean:.3f} standard_p50_us={standard_p50:.3f} "
+        f"mtp_mean_us={mtp_mean:.3f} mtp_p50_us={mtp_p50:.3f} ratio={ratio:.4f} "
+        f"warmup={args.warmup} iters={args.iters} topk_match=1 cache_unchanged=1",
+        flush=True,
+    )
+    if ratio > args.max_latency_ratio:
+        raise AssertionError(
+            f"MTP latency ratio {ratio:.4f} exceeds limit {args.max_latency_ratio:.4f}"
+        )
+    print("FUSED_LI_MANAGE_MTP_UT_OK", flush=True)
+
+
+if __name__ == "__main__":
+    main()

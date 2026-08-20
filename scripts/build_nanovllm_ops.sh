@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON:-python}"
 RAW_SOC_VERSION="${SOC_VERSION:-ascend910_9391}"
 ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
-CUSTOM_OPS="fused_li_manage"
+CUSTOM_OPS="fused_li_manage;fused_li_manage_mtp"
 NANOVLLM_EXT_BUILD_JOBS="${NANOVLLM_EXT_BUILD_JOBS:-1}"
 
 case "${RAW_SOC_VERSION}" in
@@ -57,13 +57,13 @@ else
     echo "[nanovllm ops] ERROR: installed binary_info_config.json was not found." >&2
     exit 1
   fi
-  for OP_TYPE in NanovllmFusedLiManage; do
+  for OP_TYPE in NanovllmFusedLiManage NanovllmFusedLiManageMtp; do
     if ! grep -q "${OP_TYPE}" "${BINARY_INFO_CONFIG}"; then
       echo "[nanovllm ops] ERROR: ${OP_TYPE} is missing from ${BINARY_INFO_CONFIG}." >&2
       exit 1
     fi
   done
-  echo "[nanovllm ops] verified FUSED_LI_MANAGE kernel in ${BINARY_INFO_CONFIG}"
+  echo "[nanovllm ops] verified fused LI kernels in ${BINARY_INFO_CONFIG}"
   popd >/dev/null
 fi
 
@@ -100,4 +100,4 @@ ls -lh "${ROOT_DIR}/nanovllm"/_C*.so
 
 ln -s ${ROOT_DIR}/nanovllm/_cann_ops_custom/vendors/nanovllm-ascend/op_api/lib/libcust_opapi.so ${ROOT_DIR}/nanovllm/_cann_ops_custom/vendors/nanovllm-ascend/op_api/lib/libopapi.so
 
-echo "[nanovllm ops] built fused_li_manage extension and custom OPP"
+echo "[nanovllm ops] built fused_li_manage and fused_li_manage_mtp extension/custom OPP"

@@ -62,7 +62,11 @@ TILING_DATA_FIELD_DEF(uint32_t, n1Size)
 TILING_DATA_FIELD_DEF(uint32_t, cacheSlotsSize)
 TILING_DATA_FIELD_DEF(uint32_t, scheduleMode)
 END_TILING_DATA_DEF
+#ifdef FUSED_LI_MANAGE_MTP_TILING_REGISTRATION
+REGISTER_TILING_DATA_CLASS(NanovllmFusedLiManageMtp, FusedLiManageTilingData)
+#else
 REGISTER_TILING_DATA_CLASS(NanovllmFusedLiManage, FusedLiManageTilingData)
+#endif
 
 struct FusedLiManageCompileInfo {};
 
@@ -78,6 +82,8 @@ struct FusedLiManageParaInfo {
     HMRequiredParaInfo topkIndexOut = {nullptr, nullptr};
     HMRequiredParaInfo topkSlotsOut = {nullptr, nullptr};
     HMRequiredParaInfo missCountOut = {nullptr, nullptr};
+    HMRequiredParaInfo missSrcOut = {nullptr, nullptr};
+    HMRequiredParaInfo missSlotsOut = {nullptr, nullptr};
     HMRequiredParaInfo cacheSlotsOut = {nullptr, nullptr};
 };
 
@@ -103,7 +109,8 @@ public:
 
 class FusedLiManageTiling {
 public:
-    explicit FusedLiManageTiling(gert::TilingContext *context) : context_(context) {};
+    explicit FusedLiManageTiling(gert::TilingContext *context, bool mtp = false)
+        : context_(context), mtp_(mtp) {};
     ge::graphStatus ParseAndCheck(FusedLiManageTilingInfo &tilingInfo);
     ge::graphStatus DoTiling(FusedLiManageTilingInfo *tilingInfo);
 
@@ -115,8 +122,8 @@ private:
 
     gert::TilingContext *context_ = nullptr;
     FusedLiManageTilingData tilingData_;
+    bool mtp_ = false;
 };
 
 } // namespace optiling
 #endif // FUSED_LI_MANAGE_TILING_H_
-

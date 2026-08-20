@@ -41,7 +41,8 @@ public:
                                 __gm__ uint8_t *blockTable, __gm__ uint8_t *topkIndex,
                                 __gm__ uint8_t *topkSlots, __gm__ uint8_t *missCount,
                                 __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling,
-                                TPipe *tPipe);
+                                TPipe *tPipe, uint32_t metadataGroupSize = 1U,
+                                bool topkOnly = false);
     __aicore__ inline void Process();
 
 private:
@@ -79,6 +80,13 @@ private:
     uint32_t finalizeCacheTokenCount = 0;
     uint32_t finalizeRequestChunkEnd = 0;
     LICommon::ConstInfo constInfo{};
+    uint32_t metadataGroupSize = 1U;
+    bool topkOnly = false;
+
+    __aicore__ inline uint32_t MetadataRow(uint32_t queryRow) const
+    {
+        return queryRow / metadataGroupSize;
+    }
 
     __aicore__ inline bool ResolveBalancedSchedule(uint32_t requestedCoreNum);
     __aicore__ inline void InitRequestRange(uint32_t requestedCoreNum);
@@ -157,7 +165,8 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
                                             __gm__ uint8_t *blockTable, __gm__ uint8_t *topkIndex,
                                             __gm__ uint8_t *topkSlots, __gm__ uint8_t *missCount,
                                             __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling,
-                                            TPipe *tPipe)
+                                             TPipe *tPipe, uint32_t metadataGroupSizeIn,
+                                             bool topkOnlyIn)
 {
     tmpBlockIdx = GetBlockIdx();
     if ASCEND_IS_AIV {
@@ -174,6 +183,8 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
     constInfo.cacheSlotsSize = tiling->cacheSlotsSize;
     constInfo.qHeadNum = tiling->n1Size;
     scheduleMode = tiling->scheduleMode;
+    metadataGroupSize = metadataGroupSizeIn;
+    topkOnly = topkOnlyIn;
 
     uint64_t singleCoreMm1ResSize =
         WS_DOUBLE * constInfo.qHeadNum * constInfo.s2BaseSize * sizeof(MM1_OUT_T);
@@ -200,7 +211,7 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
         vectorService.InitParams(
             static_cast<uint32_t>(constInfo.kSeqSize),
             static_cast<uint32_t>(constInfo.qHeadNum),
-            constInfo.cacheSlotsSize);
+            constInfo.cacheSlotsSize, topkOnly, metadataGroupSize);
         weightsGm.SetGlobalBuffer((__gm__ K_T *)weights);
         topkIndexGm.SetGlobalBuffer((__gm__ int32_t *)topkIndex);
         topkSlotsGm.SetGlobalBuffer((__gm__ int32_t *)topkSlots);
@@ -227,7 +238,9 @@ __aicore__ inline void LIPreload<LIT>::CleanEmptyRequest(uint32_t bIdx)
 {
     if ASCEND_IS_AIV {
         if ((tmpBlockIdx & 1U) == 0) {
-            vectorService.WriteZeroMissCount(bIdx);
+            if (!topkOnly || bIdx % metadataGroupSize == 0U) {
+                vectorService.WriteZeroMissCount(topkOnly ? bIdx / metadataGroupSize : bIdx);
+            }
         }
     }
 }
@@ -258,7 +271,8 @@ __aicore__ inline void LIPreload<LIT>::ProcessMain()
     uint32_t loop = 0;
     for (uint32_t requestOffset = 0; requestOffset < requestCount; ++requestOffset) {
         uint32_t bIdx = requestStart + requestOffset;
-        uint32_t actualSeqLen = actualSeqLengthsGm.GetValue(bIdx);
+        uint32_t metadataRow = MetadataRow(bIdx);
+        uint32_t actualSeqLen = actualSeqLengthsGm.GetValue(metadataRow);
         if (actualSeqLen == 0 || actualSeqLen > LICommon::ConstInfo::maxActualSeqLen ||
             actualSeqLen > constInfo.kSeqSize ||
             actualSeqLen > constInfo.cacheSlotsSize) {
@@ -266,12 +280,12 @@ __aicore__ inline void LIPreload<LIT>::ProcessMain()
             continue;
         }
 
-        int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(bIdx);
+        int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(metadataRow);
         if (cacheRowIdx < 0 || static_cast<uint32_t>(cacheRowIdx) >= constInfo.poolSize) {
             CleanEmptyRequest(bIdx);
             continue;
         }
-        int32_t cacheMetadata = cacheTokensGm.GetValue(bIdx);
+        int32_t cacheMetadata = cacheTokensGm.GetValue(metadataRow);
         if (cacheMetadata == 0) {
             CleanEmptyRequest(bIdx);
             continue;
@@ -295,6 +309,7 @@ __aicore__ inline void LIPreload<LIT>::ProcessMain()
             runInfo.loop = loop++;
             runInfo.bIdx = bIdx;
             runInfo.queryRow = bIdx;
+            runInfo.blockTableRow = metadataRow;
             runInfo.s2Idx = chunkIdx;
             runInfo.segmentChunkIdx = chunkIdx;
             runInfo.actS2Size = processSeqLen;
@@ -321,17 +336,18 @@ __aicore__ inline void LIPreload<LIT>::ProcessMain()
 template <typename LIT>
 __aicore__ inline uint32_t LIPreload<LIT>::GetChunkCount(uint32_t bIdx)
 {
-    uint32_t actualSeqLen = actualSeqLengthsGm.GetValue(bIdx);
+    uint32_t metadataRow = MetadataRow(bIdx);
+    uint32_t actualSeqLen = actualSeqLengthsGm.GetValue(metadataRow);
     if (actualSeqLen == 0 || actualSeqLen > LICommon::ConstInfo::maxActualSeqLen ||
         actualSeqLen > constInfo.kSeqSize ||
         actualSeqLen > constInfo.cacheSlotsSize) {
         return 0;
     }
-    int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(bIdx);
+    int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(metadataRow);
     if (cacheRowIdx < 0 || static_cast<uint32_t>(cacheRowIdx) >= constInfo.poolSize) {
         return 0;
     }
-    int32_t cacheMetadata = cacheTokensGm.GetValue(bIdx);
+    int32_t cacheMetadata = cacheTokensGm.GetValue(metadataRow);
     if (cacheMetadata < 2048 || static_cast<uint32_t>(cacheMetadata) > actualSeqLen) {
         return 0;
     }
@@ -350,6 +366,7 @@ __aicore__ inline void LIPreload<LIT>::ProcessRequestSegment(
         runInfo.loop = loop++;
         runInfo.bIdx = bIdx;
         runInfo.queryRow = bIdx;
+        runInfo.blockTableRow = MetadataRow(bIdx);
         runInfo.cacheRowIdx = cacheRowIdx;
         runInfo.s2Idx = chunkIdx;
         runInfo.segmentChunkIdx = chunkIdx - chunkStart;
@@ -396,10 +413,11 @@ __aicore__ inline void LIPreload<LIT>::ProcessBalancedMain(uint32_t globalChunkS
             uint32_t overlapEnd = Min(globalChunkEnd, requestChunkEnd);
             uint32_t chunkStart = overlapStart - requestChunkBase;
             uint32_t chunkEnd = overlapEnd - requestChunkBase;
-            int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(bIdx);
+            uint32_t metadataRow = MetadataRow(bIdx);
+            int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(metadataRow);
             uint32_t cacheTokenCount =
-                static_cast<uint32_t>(cacheTokensGm.GetValue(bIdx));
-            uint32_t actualSeqLen = actualSeqLengthsGm.GetValue(bIdx);
+                static_cast<uint32_t>(cacheTokensGm.GetValue(metadataRow));
+            uint32_t actualSeqLen = actualSeqLengthsGm.GetValue(metadataRow);
             bool isPartial = chunkStart != 0U || chunkEnd != requestChunkCount;
             if (chunkStart == 0U && chunkEnd < requestChunkCount) {
                 finalizeRequestIdx = bIdx;

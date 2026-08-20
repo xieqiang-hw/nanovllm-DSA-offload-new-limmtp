@@ -38,7 +38,8 @@ pybind11_add_module(_C bindings/nanovllm_ops.cpp
   common/torch_adapter/NPUBridge.cpp common/torch_adapter/NPUStorageImpl.cpp)
 target_include_directories(_C BEFORE PRIVATE ${ASCEND_HOME_PATH}/include
   ${TORCH_INCLUDE_DIRS} ${TORCH_NPU_PATH}/include ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/common/torch_adapter ${CMAKE_CURRENT_SOURCE_DIR}/ops/fused_li_manage)
+  ${CMAKE_CURRENT_SOURCE_DIR}/common/torch_adapter ${CMAKE_CURRENT_SOURCE_DIR}/ops/fused_li_manage
+  ${CMAKE_CURRENT_SOURCE_DIR}/ops/fused_li_manage_mtp)
 target_link_directories(_C PRIVATE ${TORCH_LIBRARY_DIRS} ${TORCH_NPU_PATH}/lib/ ${ASCEND_HOME_PATH}/lib64)
 target_link_libraries(_C PUBLIC ${TORCH_LIBRARIES} torch_npu ascendcl tiling_api register platform ascendalog dl opapi)
 target_link_options(_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/nanovllm-ascend/op_api/lib")

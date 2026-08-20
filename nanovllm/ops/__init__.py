@@ -15,4 +15,5 @@ importlib.import_module("torch_npu")
 torch = importlib.import_module("torch")
 importlib.import_module("nanovllm._C")
 fused_li_manage = torch.ops.nanovllm_dsa.fused_li_manage.default
-__all__ = ["fused_li_manage"]
+fused_li_manage_mtp = torch.ops.nanovllm_dsa.fused_li_manage_mtp.default
+__all__ = ["fused_li_manage", "fused_li_manage_mtp"]
