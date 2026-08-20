@@ -36,7 +36,7 @@ private:
     __aicore__ inline void ProcessBatch(uint32_t b)
     {
         LocalTensor<int32_t> ids = idsBuf.Get<int32_t>();
-        LocalTensor<int32_t> ids = idsBuf.Get<int32_t>();
+        LocalTensor<uint32_t> idsU = ids.template ReinterpretCast<uint32_t>();
         LocalTensor<float> keys = keysBuf.Get<float>();
         LocalTensor<int32_t> slots = keys.template ReinterpretCast<int32_t>();
         LocalTensor<float> pair0 = pair0Buf.Get<float>();
@@ -95,8 +95,8 @@ private:
 
         GatherMaskParams extract{1, static_cast<uint8_t>(CAPACITY / 64U), 8, 0};
         uint64_t ignored = 0;
-        GatherMask(ids, src.template ReinterpretCast<uint32_t>(), static_cast<uint8_t>(2), false, 0U, extract, ignored);
-        GatherMask(ids[CAPACITY / 2U], src.template ReinterpretCast<uint32_t>()[CAPACITY],
+        GatherMask(idsU, src.template ReinterpretCast<uint32_t>(), static_cast<uint8_t>(2), false, 0U, extract, ignored);
+        GatherMask(idsU[CAPACITY / 2U], src.template ReinterpretCast<uint32_t>()[CAPACITY],
                    static_cast<uint8_t>(2), false, 0U, extract, ignored);
         PipeBarrier<PIPE_V>();
         LocalTensor<int32_t> previous = keys.template ReinterpretCast<int32_t>();
