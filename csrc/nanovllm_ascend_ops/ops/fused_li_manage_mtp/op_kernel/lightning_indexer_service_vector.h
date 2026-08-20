@@ -214,6 +214,7 @@ __aicore__ inline void LIVector<LIT>::CleanInvalidOutput(int64_t invalidS1offset
     valueULocal = outQueue_.DeQue<float>();
     LIServiceVec::CopyOut(indiceOutGm[invalidS1offset], idxULocal1, constInfo_.sparseCount);
     LIServiceVec::CopyOut(slotOutGm[invalidS1offset], idxULocal1, constInfo_.sparseCount);
+    SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
     outQueue_.FreeTensor(valueULocal);
 
     if (constInfo_.returnValue) {
@@ -397,6 +398,7 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                     Duplicate(idxULocal1, constInfo_.INVALID_IDX, constInfo_.sparseCount);
                     PipeBarrier<PIPE_V>();
                     LIServiceVec::CopyOut(slotOutGm[outputOffset], idxULocal1, constInfo_.sparseCount);
+                    SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
                     outQueue_.FreeTensor(valueULocal);
                 } else {
                     LocalTensor<float> outValueUb = outQueue_.AllocTensor<float>();
