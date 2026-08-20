@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--max-latency-ratio", type=float, default=2.0)
+    parser.add_argument("--max-latency-ratio", type=float, default=1.25)
     return parser.parse_args()
 
 
@@ -56,7 +56,7 @@ def make_case(args: argparse.Namespace) -> dict[str, torch.Tensor]:
     req_entries = torch.arange(batch, dtype=torch.int32, device=device)
     cache_slots = torch.full((batch, args.seq_len), -1, dtype=torch.int32, device=device)
     topk_src = torch.full((batch * MTP_WIDTH, 1, TOPK), -1, dtype=torch.int32, device=device)
-    topk_dst = torch.full_like(topk_src, -7)
+    topk_dst = torch.full(topk_src.shape, -7, dtype=torch.int32, device=device)
     miss_src = torch.full((batch, UNION_CAPACITY), -1, dtype=torch.int32, device=device)
     miss_dst = torch.full_like(miss_src, -1)
     miss_counts = torch.full((batch,), -1, dtype=torch.int32, device=device)

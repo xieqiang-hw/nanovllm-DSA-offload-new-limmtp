@@ -294,21 +294,38 @@ ge::graphStatus FusedLiManageTiling::DoTiling(FusedLiManageTilingInfo *tilingInf
     constexpr uint32_t M_BASE_SIZE = 64;
     constexpr uint32_t S2_BASE_SIZE = 512;
     uint64_t workspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    workspaceSize += M_BASE_SIZE * S2_BASE_SIZE * MM1_RES_ELEM_SIZE * DOUBLE_BUFFER * blockDim;
+    if (mtp_) {
+        constexpr uint32_t MTP_M_BASE_SIZE = 256;
+        workspaceSize += MTP_M_BASE_SIZE * S2_BASE_SIZE * MM1_RES_ELEM_SIZE * DOUBLE_BUFFER * blockDim;
+    } else {
+        workspaceSize += M_BASE_SIZE * S2_BASE_SIZE * MM1_RES_ELEM_SIZE * DOUBLE_BUFFER * blockDim;
+    }
     uint64_t scoreStride = ((static_cast<uint64_t>(tilingInfo->s2Size) + S2_BASE_SIZE - 1) / S2_BASE_SIZE) *
                            S2_BASE_SIZE;
     if (!mtp_) {
         workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * scoreStride * sizeof(float);
     }
+    if (mtp_) {
+        constexpr uint32_t S1_BASE_SIZE = 8;
+        constexpr uint32_t LD_HEAD_TAIL = 2;
+        constexpr uint32_t VALUE_AND_INDEX = 2;
+        constexpr uint32_t LD_PARAM_NUM = 16;
+        workspaceSize += static_cast<uint64_t>(blockDim) * LD_HEAD_TAIL * S1_BASE_SIZE *
+                         VALUE_AND_INDEX * DECODE_SPARSE_COUNT * sizeof(float);
+        workspaceSize += static_cast<uint64_t>(blockDim) * LD_HEAD_TAIL * S1_BASE_SIZE *
+                         LD_PARAM_NUM * sizeof(int64_t);
+    }
     constexpr uint32_t PARTIAL_SLOTS_PER_CORE = 2;
     constexpr uint32_t PARTIAL_META_INTS_PER_CORE = 8;
     constexpr uint32_t TOPK_PAIR_ELEMS = DECODE_SPARSE_COUNT * 2;
-    workspaceSize +=
-        static_cast<uint64_t>(blockDim) * PARTIAL_SLOTS_PER_CORE * TOPK_PAIR_ELEMS * sizeof(float);
-    workspaceSize += static_cast<uint64_t>(blockDim) * PARTIAL_META_INTS_PER_CORE * sizeof(int32_t);
+    if (!mtp_) {
+        workspaceSize +=
+            static_cast<uint64_t>(blockDim) * PARTIAL_SLOTS_PER_CORE * TOPK_PAIR_ELEMS * sizeof(float);
+        workspaceSize += static_cast<uint64_t>(blockDim) * PARTIAL_META_INTS_PER_CORE * sizeof(int32_t);
+    }
     context_->GetWorkspaceSizes(1)[0] = workspaceSize;
 
-    tilingData_.set_bSize(tilingInfo->bSize);
+    tilingData_.set_bSize(mtp_ ? tilingInfo->bSize / 4U : tilingInfo->bSize);
     tilingData_.set_s2Size(tilingInfo->s2Size);
     tilingData_.set_blockSize(tilingInfo->blockSize);
     tilingData_.set_maxBlockNumPerBatch(tilingInfo->maxBlockNumPerBatch);

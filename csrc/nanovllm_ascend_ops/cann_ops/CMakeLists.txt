@@ -240,7 +240,6 @@ op_add_subdirectory(OP_LIST OP_DIR_LIST)
 # to include the kernels in binary_info_config.json.
 set(fused_li_manage_kernel_aliases nanovllm_fused_li_manage)
 set(fused_li_manage_mtp_kernel_aliases nanovllm_fused_li_manage_mtp)
-set(nanovllm_fused_li_manage_mtp_depends ../ops/fused_li_manage)
 
 foreach (OP_DIR ${OP_DIR_LIST})
     get_filename_component(_op_name "${OP_DIR}" NAME)

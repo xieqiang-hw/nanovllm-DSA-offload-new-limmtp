@@ -134,7 +134,7 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 - 将四路 TopK 集合与 `torch_npu.npu_lightning_indexer` 的 MTP4 输出比较；
 - 验证 `cache_slots_pool` 没有被修改；
 - 使用 NPU Event 分别统计标准 LightningIndexer 和 `fused_li_manage_mtp` 的平均/P50 时延；
-- 检查两者的平均时延比，默认上限为 `2.0`。
+- 检查两者的平均时延比，默认上限为 `1.25`。
 
 构建完成后执行默认测试：
 
@@ -158,7 +158,7 @@ python3 ut_ops/test_fused_li_manage_mtp.py \
   --batch-size 1 \
   --seq-len 65536 \
   --cache-tokens 8192 \
-  --max-latency-ratio 2.0
+  --max-latency-ratio 1.25
 ```
 
 测试成功标志：

@@ -6,20 +6,37 @@
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include "fused_li_manage_mtp_template_tiling_key.h"
-#include "../fused_li_manage/fused_li_manage_kernel.h"
+#include "lightning_indexer_kernel.h"
 
 using namespace LIKernel;
+
+__aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
+                                                  __gm__ uint8_t *missCount,
+                                                  uint32_t batchSize)
+{
+    if ASCEND_IS_AIV {
+        if (GetBlockIdx() == 0U) {
+            GlobalTensor<int32_t> topkSlotsGm;
+            GlobalTensor<int32_t> missCountGm;
+            topkSlotsGm.SetGlobalBuffer((__gm__ int32_t *)topkSlots);
+            missCountGm.SetGlobalBuffer((__gm__ int32_t *)missCount);
+            AscendC::InitGlobalMemory(topkSlotsGm, static_cast<uint64_t>(batchSize) * 4U * 2048U, -1);
+            AscendC::InitGlobalMemory(missCountGm, batchSize, 0);
+        }
+    }
+}
 
 #define LI_MTP_COPY_TILING()                                                                                           \
     GET_TILING_DATA_WITH_STRUCT(FusedLiManageTilingData, tiling_data_in, tiling);                                      \
     const FusedLiManageTilingData *__restrict tiling_data = &tiling_data_in
 
-#define INVOKE_LI_MTP_TOPK(templateClass, ...)                                                                         \
+#define INVOKE_LI_MTP_TOPK(...)                                                                                        \
     do {                                                                                                               \
-        templateClass<LIType<__VA_ARGS__>> op;                                                                         \
         LI_MTP_COPY_TILING();                                                                                           \
-        op.Init(query, key, weights, reqPoolEntries, cacheSlots, cacheTokens, actualSeqLengths, blockTable,            \
-                topkIndex, topkSlots, missCount, user, tiling_data, &tPipe, 4U, true);                                 \
+        InitMtpPlaceholderOutputs(topkSlots, missCount, tiling_data->bSize);                                            \
+        LIPreload<LIType<__VA_ARGS__, int32_t, true, LI_LAYOUT::BSND, LI_LAYOUT::PA_BSND>> op;                          \
+        op.Init(query, key, weights, nullptr, actualSeqLengths, blockTable, topkIndex, topkSlots,                      \
+                user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
     } while (0)
 
@@ -40,12 +57,15 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
     (void)missSrcIds;
     (void)missDstSlots;
     (void)cacheSlotsOut;
+    (void)reqPoolEntries;
+    (void)cacheSlots;
+    (void)cacheTokens;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     if constexpr (DT == LI_MTP_TPL_FP16) {
-        INVOKE_LI_MTP_TOPK(LIPreload, half);
+        INVOKE_LI_MTP_TOPK(half, half);
     } else {
-        INVOKE_LI_MTP_TOPK(LIPreload, bfloat16_t);
+        INVOKE_LI_MTP_TOPK(bfloat16_t, bfloat16_t);
     }
 #endif
 }
