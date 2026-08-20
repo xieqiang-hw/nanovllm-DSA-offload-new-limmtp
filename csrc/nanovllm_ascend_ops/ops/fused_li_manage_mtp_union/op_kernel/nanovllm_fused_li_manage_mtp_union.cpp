@@ -140,12 +140,12 @@ private:
                         1,static_cast<uint32_t>(valid*sizeof(int32_t)),0,0,0},
                     AscendC::DataCopyPadExtParams<int32_t>{false,0,0,0});
         Sync<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-        Adds(key,s0,-thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES),valid); PipeBarrier<PIPE_V>();
-        Adds(temp,s1,-thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+1U),valid); PipeBarrier<PIPE_V>();
+        Adds(key,s0,-routeThreshold[0],valid); PipeBarrier<PIPE_V>();
+        Adds(temp,s1,-routeThreshold[1],valid); PipeBarrier<PIPE_V>();
         Max(key,key,temp,valid); PipeBarrier<PIPE_V>();
-        Adds(temp,s2,-thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+2U),valid); PipeBarrier<PIPE_V>();
+        Adds(temp,s2,-routeThreshold[2],valid); PipeBarrier<PIPE_V>();
         Max(key,key,temp,valid); PipeBarrier<PIPE_V>();
-        Adds(temp,s3,-thresholdsGm.GetValue(static_cast<uint64_t>(b)*ROUTES+3U),valid); PipeBarrier<PIPE_V>();
+        Adds(temp,s3,-routeThreshold[3],valid); PipeBarrier<PIPE_V>();
         Max(key,key,temp,valid); PipeBarrier<PIPE_V>();
         Muls(key,key,-1.0f,valid); PipeBarrier<PIPE_V>();
         Duplicate(invalid.ReinterpretCast<int32_t>(),NEG_INF_BITS,CHUNK); PipeBarrier<PIPE_V>();
@@ -195,7 +195,9 @@ private:
             int32_t src=static_cast<int32_t>(bits.GetValue(i*2U+1U));
             int32_t slot=(src>=0&&static_cast<uint32_t>(src)<actual)?
                          cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+src):-1;
-            if(slot<0||static_cast<uint32_t>(slot)>=budget) { src=-1; slot=-1; }
+            if(slot<0||static_cast<uint32_t>(slot)>=budget||IsProtectedTopk(b,src)) {
+                src=-1; slot=-1;
+            }
             if(src<0) {
                 for(uint32_t scanned=0;scanned<actual;++scanned) {
                     uint32_t candidate=fallbackCursor++;
@@ -230,6 +232,21 @@ private:
         LocalTensor<int32_t> result=input.ReinterpretCast<int32_t>();
         LocalTensor<int32_t> countLocal=countBuf.Get<int32_t>();
         uint32_t count=BuildUnion(b,input,merged,result,work.ReinterpretCast<int32_t>());
+        if(count>0U) {
+            for(uint32_t r=0;r<ROUTES;++r) {
+                float threshold=3.402823466e+38F;
+                uint64_t topkBase=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
+                uint64_t scoreBase=(static_cast<uint64_t>(b)*ROUTES+r)*sourceCapacity;
+                for(uint32_t i=0;i<TOPK;++i) {
+                    int32_t id=topkSrcGm.GetValue(topkBase+i);
+                    if(id>=0&&static_cast<uint32_t>(id)<sourceCapacity) {
+                        float score=scoresGm.GetValue(scoreBase+static_cast<uint32_t>(id));
+                        threshold=score<threshold?score:threshold;
+                    }
+                }
+                routeThreshold[r]=threshold;
+            }
+        }
         FindEvicts(b,count,merged,input,work,result);
         countLocal.SetValue(0,static_cast<int32_t>(count));
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
@@ -241,6 +258,7 @@ private:
     TBuf<TPosition::VECCALC> pairInBuf,pairOutBuf,workBuf,countBuf;
     uint32_t batchSize=0U,sourceCapacity=0U;
     uint32_t missLen[ROUTES]={0U,0U,0U,0U};
+    float routeThreshold[ROUTES]={0.0F,0.0F,0.0F,0.0F};
 };
 }
 extern "C" __global__ __aicore__ void nanovllm_fused_li_manage_mtp_union(
