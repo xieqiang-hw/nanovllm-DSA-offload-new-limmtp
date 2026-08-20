@@ -651,6 +651,12 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
             DataCopyPad(indiceOutGm[outOffset], idxULocal1,
                         {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(int32_t)), 0, 0});
             SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+            Duplicate(idxULocal1, constInfo_.INVALID_IDX, constInfo_.sparseCount);
+            PipeBarrier<PIPE_V>();
+            SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+            DataCopyPad(slotOutGm[outOffset], idxULocal1,
+                        {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(int32_t)), 0, 0});
+            SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
         } else {
             Extract(outValueUb, outIdxUb, curValueIdxUb, (BASE_TOPK / 32));
             PipeBarrier<PIPE_V>();
