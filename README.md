@@ -1,9 +1,11 @@
 # fused_li_manage 算子
 
-本仓库包含 Ascend `fused_li_manage` 自定义算子的实现、构建代码和测试。
+本仓库只保留 Ascend `fused_li_manage` 自定义算子的实现、构建代码，以及以下两类测试：
 
-- `ut_ops/test_fused_li_manage.py`：正确性、缓存管理语义及 18-bit/21-bit 边界测试。
-- `ut_ops/test_fused_li_manage_perf.py`：多 batch、序列长度和 miss 范围的性能测试。
+- `test_fused_li_manage.py`：正确性、缓存管理语义及 18-bit/21-bit 边界测试，同时提供简单延迟数据。
+- `test_fused_li_manage_perf.py`：面向多 batch、序列长度和 miss 范围的性能测试。
+
+两项测试均只调用 `fused_li_manage` 和 LightningIndexer 基线，不调用 Scatter 算子。
 
 ## 编译
 
@@ -22,24 +24,79 @@ export SOC_VERSION=ascend910_9391
 bash scripts/build_nanovllm_ops.sh
 ```
 
-主要产物：
+构建脚本只编译 `fused_li_manage`。主要产物为：
 
 - `nanovllm/_C*.so`：Torch 算子注册扩展。
 - `nanovllm/_cann_ops_custom/`：本地 CANN 自定义算子包。
 
-## 测试
+## 测试环境
 
-测试必须在 Ascend NPU 上运行。请先按实际环境设置 CANN、`PYTHONPATH` 和 NPU 设备变量。
+测试必须在 Ascend NPU 上运行。每次测试前可设置：
 
-正确性及边界测试：
+```bash
+unset NANOVLLM_OFFLOAD_MODE
+unset NANOVLLM_PROFILE_DECODE_OUTPUT
+unset NANOVLLM_CUST_OPAPI_LIB
+unset ASCEND_CUSTOM_OPP_PATH
+unset NANOVLLM_NUM_SPECULATIVE_TOKENS
+export ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.1
+export CANN_INSTALL_PATH=/usr/local/Ascend/cann-8.5.1
+export PYTHONUNBUFFERED=1
+export PYTHONPATH=$PWD:$PYTHONPATH
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ASCEND_LAUNCH_BLOCKING=0
+export ASCEND_RT_VISIBLE_DEVICES=11
+```
+
+`ASCEND_RT_VISIBLE_DEVICES=11` 会把物理设备 11 映射为测试命令中的 `npu:0`，请按实际机器调整。
+
+### 正确性与边界测试
+
+快速正确性测试：
+
+```bash
+python3 ut_ops/test_fused_li_manage.py \
+  --device npu:0 \
+  --heads 32 \
+  --seq-lens 65536 \
+  --batch-size 1 \
+  --cache-tokens 6144 \
+  --miss-count 300 \
+  --warmup 1 \
+  --iters 3 \
+  --seed 7
+```
+
+运行默认的 18-bit/21-bit 边界用例：
 
 ```bash
 python3 ut_ops/test_fused_li_manage.py --device npu:0
 ```
 
-成功标志为 `FUSED_LI_MANAGE_UT_OK`。
+成功标志：
 
-性能测试示例：
+```text
+FUSED_LI_MANAGE_UT_OK
+```
+
+### 性能测试
+
+单组性能测试：
+
+```bash
+python3 ut_ops/test_fused_li_manage_perf.py \
+  --device npu:0 \
+  --heads 32 \
+  --batch-sizes 24 \
+  --seq-lens 20992 \
+  --cache-tokens 6144 \
+  --miss-ranges 200:200 \
+  --warmup 10 \
+  --iters 100 \
+  --seed 7
+```
+
+扫描多组 batch、序列长度和 miss 范围：
 
 ```bash
 python3 ut_ops/test_fused_li_manage_perf.py \
@@ -54,7 +111,11 @@ python3 ut_ops/test_fused_li_manage_perf.py \
   --seed 7
 ```
 
-成功标志为 `FUSED_LI_MANAGE_PERF_UT_OK`。
+性能脚本输出 LightningIndexer、完整 `fused_li_manage` 和二者差值，即索引缓存管理增量。成功标志：
+
+```text
+FUSED_LI_MANAGE_PERF_UT_OK
+```
 
 查看全部参数：
 
