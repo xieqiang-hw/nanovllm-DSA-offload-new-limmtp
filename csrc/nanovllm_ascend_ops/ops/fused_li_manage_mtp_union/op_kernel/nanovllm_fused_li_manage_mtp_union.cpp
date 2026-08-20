@@ -110,9 +110,7 @@ private:
             countLocal.SetValue(0,ids.ReinterpretCast<int32_t>().GetValue(0));
 
             uint32_t remaining=total-1U;
-            uint32_t blockCounts[128];
-            uint32_t blockNum=(remaining+63U)/64U;
-            uint32_t uniqueTailCount=0U;
+            uint64_t kept=0U;
             if(remaining!=0U) {
                 CreateVecIndex(offsets,static_cast<int32_t>(0),remaining);
                 PipeBarrier<PIPE_V>();
@@ -122,44 +120,28 @@ private:
                 PipeBarrier<PIPE_V>();
                 Gather(shifted,idsFloat,offsets.ReinterpretCast<uint32_t>(),0U,remaining);
                 PipeBarrier<PIPE_V>();
+                Duplicate(uniqueMask.ReinterpretCast<uint32_t>(),0U,(remaining+31U)/32U);
+                PipeBarrier<PIPE_V>();
+                Compare(uniqueMask,shifted,idsFloat,CMPMODE::NE,remaining);
+                PipeBarrier<PIPE_V>();
                 GatherMaskParams uniqueParams;
                 uniqueParams.src0BlockStride=1;
                 uniqueParams.repeatTimes=1;
                 uniqueParams.src0RepeatStride=8;
                 uniqueParams.src1RepeatStride=0;
-                for(uint32_t block=0;block<blockNum;++block) {
-                    uint32_t blockOffset=block*64U;
-                    uint32_t blockLen=remaining-blockOffset;
-                    blockLen=blockLen>64U?64U:blockLen;
-                    Duplicate(uniqueMask.ReinterpretCast<uint32_t>(),0U,2U);
-                    PipeBarrier<PIPE_V>();
-                    Compare(uniqueMask,shifted[blockOffset],idsFloat[blockOffset],CMPMODE::NE,blockLen);
-                    PipeBarrier<PIPE_V>();
-                    uint64_t blockKept=0U;
-                    GatherMask(compactFloat[blockOffset],shifted[blockOffset],
-                               uniqueMask.ReinterpretCast<uint32_t>(),true,blockLen,
-                               uniqueParams,blockKept);
-                    Sync<HardEvent::V_S>(HardEvent::V_S);
-                    blockCounts[block]=static_cast<uint32_t>(blockKept);
-                    uniqueTailCount+=blockCounts[block];
-                    if(blockCounts[block]!=0U) {
-                        Cast(compactInt[blockOffset],compactFloat[blockOffset],RoundMode::CAST_RINT,
-                             blockCounts[block]);
-                        PipeBarrier<PIPE_V>();
-                    }
-                }
+                GatherMask(compactFloat,shifted,uniqueMask.ReinterpretCast<uint32_t>(),
+                           true,remaining,uniqueParams,kept);
+                Sync<HardEvent::V_S>(HardEvent::V_S);
+                Cast(compactInt,compactFloat,RoundMode::CAST_RINT,static_cast<uint32_t>(kept));
+                PipeBarrier<PIPE_V>();
             }
-            count=1U+uniqueTailCount;
+            count=1U+static_cast<uint32_t>(kept);
             Sync<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY],countLocal,
                         {1,static_cast<uint16_t>(sizeof(int32_t)),0,0});
-            uint32_t outOffset=1U;
-            for(uint32_t block=0;block<blockNum;++block) {
-                if(blockCounts[block]!=0U) {
-                    DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+outOffset],compactInt[block*64U],
-                                {1,static_cast<uint16_t>(blockCounts[block]*sizeof(int32_t)),0,0});
-                    outOffset+=blockCounts[block];
-                }
+            if(kept!=0U) {
+                DataCopyPad(outGm[static_cast<uint64_t>(b)*CAPACITY+1U],compactInt,
+                            {1,static_cast<uint16_t>(kept*sizeof(int32_t)),0,0});
             }
             Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
