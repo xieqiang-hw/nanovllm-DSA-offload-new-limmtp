@@ -6,7 +6,7 @@
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include "fused_li_manage_mtp_template_tiling_key.h"
-#include "../../fused_li_manage/op_kernel/fused_li_manage_kernel.h"
+#include "../fused_li_manage/fused_li_manage_kernel.h"
 
 using namespace LIKernel;
 
