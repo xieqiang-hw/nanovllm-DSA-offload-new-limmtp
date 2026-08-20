@@ -105,7 +105,7 @@ private:
         LocalTensor<float> s0=work, s1=work[CHUNK], s2=work[CHUNK*2U], s3=work[CHUNK*3U];
         LocalTensor<float> key=work[CHUNK*4U], temp=work[CHUNK*5U];
         LocalTensor<int32_t> cache=work[CHUNK*6U].ReinterpretCast<int32_t>();
-        LocalTensor<uint32_t> payload=work[CHUNK*7U].ReinterpretCast<uint32_t>();
+        LocalTensor<int32_t> payload=work[CHUNK*7U].ReinterpretCast<int32_t>();
         LocalTensor<uint8_t> mask=work[CHUNK*8U].ReinterpretCast<uint8_t>();
         LocalTensor<float> invalid=work[CHUNK*9U];
         LocalTensor<float> sortTmp=work[CHUNK*10U];
@@ -134,9 +134,9 @@ private:
         Select(key,mask,invalid,key,SELMODE::VSEL_TENSOR_TENSOR_MODE,valid); PipeBarrier<PIPE_V>();
         CompareScalar(mask,cache,-1,CMPMODE::EQ,valid); PipeBarrier<PIPE_V>();
         Select(key,mask,invalid,key,SELMODE::VSEL_TENSOR_TENSOR_MODE,valid); PipeBarrier<PIPE_V>();
-        ArithProgression<uint32_t>(payload,start,1U,CHUNK); PipeBarrier<PIPE_V>();
+        ArithProgression<int32_t>(payload,static_cast<int32_t>(start),1,CHUNK); PipeBarrier<PIPE_V>();
         if(valid<CHUNK) { Duplicate(key.ReinterpretCast<int32_t>()[valid],NEG_INF_BITS,CHUNK-valid); PipeBarrier<PIPE_V>(); }
-        SortChunk(chunkPair,key,payload,sortTmp);
+        SortChunk(chunkPair,key,payload.ReinterpretCast<uint32_t>(),sortTmp);
     }
 
     __aicore__ inline void FindEvicts(uint32_t b,uint32_t count,LocalTensor<float> acc,
