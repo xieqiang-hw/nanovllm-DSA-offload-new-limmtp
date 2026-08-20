@@ -198,6 +198,13 @@ private:
             if(slot<0||static_cast<uint32_t>(slot)>=budget||IsProtectedTopk(b,src)) {
                 src=-1; slot=-1;
             }
+            if(src>=0) {
+                for(uint32_t prev=0;prev<i;++prev) {
+                    if(result.GetValue(prev)==src||result.GetValue(CAPACITY+prev)==slot) {
+                        src=-1; slot=-1; break;
+                    }
+                }
+            }
             if(src<0) {
                 for(uint32_t scanned=0;scanned<actual;++scanned) {
                     uint32_t candidate=fallbackCursor++;
@@ -208,7 +215,8 @@ private:
                     if(IsProtectedTopk(b,static_cast<int32_t>(candidate))) continue;
                     bool duplicate=false;
                     for(uint32_t prev=0;prev<i;++prev) {
-                        if(result.GetValue(prev)==static_cast<int32_t>(candidate)) {
+                        if(result.GetValue(prev)==static_cast<int32_t>(candidate)||
+                           result.GetValue(CAPACITY+prev)==candidateSlot) {
                             duplicate=true; break;
                         }
                     }
