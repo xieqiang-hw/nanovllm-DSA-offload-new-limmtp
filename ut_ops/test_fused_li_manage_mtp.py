@@ -150,6 +150,30 @@ def main() -> None:
         )
     if int((actual_slots == 0).sum().item()) == 0:
         raise AssertionError("test case did not exercise legal HBM slot 0")
+    expected_union = []
+    expected_counts = []
+    for batch_idx in range(args.batch_size):
+        route_begin = batch_idx * MTP_WIDTH
+        route_end = route_begin + MTP_WIDTH
+        batch_misses = expected_src[route_begin:route_end][
+            expected_slots[route_begin:route_end] < 0
+        ]
+        batch_union = torch.unique(batch_misses, sorted=True)
+        expected_union.append(batch_union)
+        expected_counts.append(batch_union.numel())
+    actual_counts = case["miss_counts"].cpu().tolist()
+    if actual_counts != expected_counts:
+        raise AssertionError(
+            f"MTP union miss counts differ: actual={actual_counts}, expected={expected_counts}"
+        )
+    for batch_idx, batch_union in enumerate(expected_union):
+        count = expected_counts[batch_idx]
+        actual_union = case["miss_src"][batch_idx, :count]
+        if not torch.equal(actual_union, batch_union):
+            mismatch = int((actual_union != batch_union).sum().item())
+            raise AssertionError(
+                f"MTP union miss IDs differ for batch {batch_idx}: mismatches={mismatch}"
+            )
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError("phase-1 MTP TopK modified cache_slots_pool")
     standard_mean, standard_p50 = benchmark(lambda: call_standard(case), args.warmup, args.iters)
@@ -160,7 +184,8 @@ def main() -> None:
         f"batch={args.batch_size} routes=4 seq_len={args.seq_len} dtype={args.dtype} "
         f"standard_mean_us={standard_mean:.3f} standard_p50_us={standard_p50:.3f} "
         f"mtp_mean_us={mtp_mean:.3f} mtp_p50_us={mtp_p50:.3f} ratio={ratio:.4f} "
-        f"warmup={args.warmup} iters={args.iters} topk_hit_miss_reorder_match=1 cache_unchanged=1",
+        f"warmup={args.warmup} iters={args.iters} topk_hit_miss_reorder_match=1 "
+        f"union_miss_match=1 cache_unchanged=1",
         flush=True,
     )
     if ratio > args.max_latency_ratio:

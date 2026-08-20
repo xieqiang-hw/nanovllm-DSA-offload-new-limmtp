@@ -130,9 +130,8 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 以及 TopK token 的 HBM hit/miss 判断。四路 query 使用同一个请求的 prefill 满块候选范围。
 `topk_src_ids` 当前保留完整 TopK source ID；`topk_dst_slots` 对 miss 写 `-1`，对 hit 写入
 合法 HBM slot（包括 slot 0）。TopK 随后按“miss 在前、hit 在后，组内 source ID 升序”
-重排，以便后续对四路 miss 前缀做有序并集。当前阶段暂不执行四路 miss 并集、淘汰或
-cache 映射更新；
-`miss_src_ids`、`miss_dst_slots` 和 `miss_counts` 仍保留给后续阶段。
+重排。算子使用四指针合并四路有序 miss 前缀，写出升序去重的 `miss_src_ids` 和
+`miss_counts`。当前阶段暂不执行淘汰或 cache 映射更新；`miss_dst_slots` 仍保留给后续阶段。
 
 测试脚本会完成以下检查：
 

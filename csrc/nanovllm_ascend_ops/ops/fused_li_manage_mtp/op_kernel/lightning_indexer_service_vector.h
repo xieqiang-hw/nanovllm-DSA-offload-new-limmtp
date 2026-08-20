@@ -52,11 +52,14 @@ public:
                                                 GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm,
                                                 GlobalTensor<int32_t> reqPoolEntriesGm,
                                                 GlobalTensor<int32_t> cacheSlotsGm,
-                                                GlobalTensor<int32_t> slotOutGm);
+                                                GlobalTensor<int32_t> slotOutGm,
+                                                GlobalTensor<int32_t> missSrcIdsGm,
+                                                GlobalTensor<int32_t> missCountGm);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
     __aicore__ inline void InitLDBuffers(TPipe *pipe);
+    __aicore__ inline void ProcessMissUnion();
 
 protected:
     GlobalTensor<MM1_OUT_T> mm1ResGm;
@@ -68,6 +71,8 @@ protected:
     GlobalTensor<int32_t> reqPoolEntriesGm;
     GlobalTensor<int32_t> cacheSlotsGm;
     GlobalTensor<int32_t> slotOutGm;
+    GlobalTensor<int32_t> missSrcIdsGm;
+    GlobalTensor<int32_t> missCountGm;
     // =================================常量区=================================
 
 private:
@@ -209,7 +214,9 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
                                     GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm,
                                     GlobalTensor<int32_t> reqPoolEntriesGm,
                                     GlobalTensor<int32_t> cacheSlotsGm,
-                                    GlobalTensor<int32_t> slotOutGm)
+                                    GlobalTensor<int32_t> slotOutGm,
+                                    GlobalTensor<int32_t> missSrcIdsGm,
+                                    GlobalTensor<int32_t> missCountGm)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
@@ -220,6 +227,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
     this->reqPoolEntriesGm = reqPoolEntriesGm;
     this->cacheSlotsGm = cacheSlotsGm;
     this->slotOutGm = slotOutGm;
+    this->missSrcIdsGm = missSrcIdsGm;
+    this->missCountGm = missCountGm;
 }
 
 template <typename LIT>
@@ -369,8 +378,86 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
         Add(indexLocal, indexLocal, scratchLocal, constInfo_.sparseCount);
         PipeBarrier<PIPE_V>();
     }
+    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+    uint32_t routeMissCount = 0;
+    while (routeMissCount < constInfo_.sparseCount &&
+           slotLocal.GetValue(routeMissCount) == constInfo_.INVALID_IDX) {
+        ++routeMissCount;
+    }
+    uint32_t globalRouteIdx = static_cast<uint32_t>(outputOffset / constInfo_.sparseCount);
+    uint32_t batchIdx = globalRouteIdx / constInfo_.qSeqSize;
+    uint32_t routeIdx = globalRouteIdx % constInfo_.qSeqSize;
+    missSrcIdsGm.SetValue(static_cast<uint64_t>(batchIdx) * 8192U + routeIdx,
+                          static_cast<int32_t>(routeMissCount));
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     LIServiceVec::CopyOut(slotOutGm[outputOffset], slotLocal, constInfo_.sparseCount);
+}
+
+template <typename LIT>
+__aicore__ inline void LIVector<LIT>::ProcessMissUnion()
+{
+    constexpr uint32_t ROUTE_NUM = 4U;
+    constexpr uint32_t UNION_CAPACITY = ROUTE_NUM * BASE_TOPK;
+    uint32_t logicalCoreNum = GetBlockNum() * 2U - 1U;
+    uint32_t logicalCoreIdx = static_cast<uint32_t>(blockId_);
+    if (logicalCoreIdx >= logicalCoreNum) {
+        return;
+    }
+
+    LocalTensor<int32_t> routeIdsLocal = ldToBeMrgBuf_.Get<int32_t>();
+    LocalTensor<int32_t> unionLocal = ldTmpBuf_.Get<int32_t>();
+    for (uint32_t batchIdx = logicalCoreIdx; batchIdx < constInfo_.batchSize;
+         batchIdx += logicalCoreNum) {
+        uint32_t routeCount[ROUTE_NUM] = {0U, 0U, 0U, 0U};
+        uint32_t routePos[ROUTE_NUM] = {0U, 0U, 0U, 0U};
+        uint64_t unionBase = static_cast<uint64_t>(batchIdx) * UNION_CAPACITY;
+        for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
+            int32_t count = missSrcIdsGm.GetValue(unionBase + routeIdx);
+            routeCount[routeIdx] = count > 0 ? static_cast<uint32_t>(count) : 0U;
+            if (routeCount[routeIdx] > 0U) {
+                uint64_t topkBase = (static_cast<uint64_t>(batchIdx) * ROUTE_NUM + routeIdx) * BASE_TOPK;
+                DataCopyPad(routeIdsLocal[routeIdx * BASE_TOPK], indiceOutGm[topkBase],
+                            AscendC::DataCopyExtParams{
+                                1, routeCount[routeIdx] * static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0},
+                            AscendC::DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
+            }
+        }
+        SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+
+        uint32_t unionCount = 0U;
+        int32_t lastId = constInfo_.INVALID_IDX;
+        while (routePos[0] < routeCount[0] || routePos[1] < routeCount[1] ||
+               routePos[2] < routeCount[2] || routePos[3] < routeCount[3]) {
+            int32_t minId = INT32_MAX;
+            for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
+                if (routePos[routeIdx] < routeCount[routeIdx]) {
+                    int32_t candidate = routeIdsLocal.GetValue(
+                        routeIdx * BASE_TOPK + routePos[routeIdx]);
+                    minId = candidate < minId ? candidate : minId;
+                }
+            }
+            if (minId != lastId) {
+                unionLocal.SetValue(unionCount++, minId);
+                lastId = minId;
+            }
+            for (uint32_t routeIdx = 0; routeIdx < ROUTE_NUM; ++routeIdx) {
+                while (routePos[routeIdx] < routeCount[routeIdx] &&
+                       routeIdsLocal.GetValue(routeIdx * BASE_TOPK + routePos[routeIdx]) == minId) {
+                    ++routePos[routeIdx];
+                }
+            }
+        }
+
+        if (unionCount > 0U) {
+            SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+            DataCopyPad(missSrcIdsGm[unionBase], unionLocal,
+                        {1, static_cast<uint16_t>(unionCount * sizeof(int32_t)), 0, 0});
+        }
+        missCountGm.SetValue(batchIdx, static_cast<int32_t>(unionCount));
+        if (unionCount > 0U) {
+            SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+        }
+    }
 }
 
 template <typename LIT>
