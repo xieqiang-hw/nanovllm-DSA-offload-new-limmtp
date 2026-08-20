@@ -7,6 +7,7 @@
 namespace optiling {
 BEGIN_TILING_DATA_DEF(FusedLiManageMtpUnionTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, batchSize)
+TILING_DATA_FIELD_DEF(uint32_t, sourceCapacity)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(NanovllmFusedLiManageMtpUnion, FusedLiManageMtpUnionTilingData)
 struct FusedLiManageMtpUnionCompileInfo {};

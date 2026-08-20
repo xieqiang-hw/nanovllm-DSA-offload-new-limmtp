@@ -4,6 +4,7 @@
 namespace optiling {
 struct FusedLiManageMtpUnionTilingData {
     uint32_t batchSize;
+    uint32_t sourceCapacity;
 };
 } // namespace optiling
 

@@ -19,7 +19,7 @@ using namespace LIKernel;
         LI_MTP_COPY_TILING();                                                                                           \
         LIPreload<LIType<__VA_ARGS__, int32_t, true, LI_LAYOUT::BSND, LI_LAYOUT::PA_BSND>> op;                          \
         op.Init(query, key, weights, reqPoolEntries, cacheSlots, nullptr, actualSeqLengths, blockTable,              \
-                topkIndex, topkSlots, missSrcIds, missDstSlots,                                                       \
+                topkIndex, topkSlots, missSrcIds, missDstSlots, scoreScratch, thresholdScratch,                       \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
     } while (0)
@@ -32,7 +32,8 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
     __gm__ uint8_t *blockTable, __gm__ uint8_t *topkIndex,
     __gm__ uint8_t *topkSlots, __gm__ uint8_t *missSrcIds,
     __gm__ uint8_t *missDstSlots, __gm__ uint8_t *missCount,
-    __gm__ uint8_t *cacheSlotsOut, __gm__ uint8_t *workspace,
+    __gm__ uint8_t *cacheSlotsOut, __gm__ uint8_t *scoreScratch,
+    __gm__ uint8_t *thresholdScratch, __gm__ uint8_t *workspace,
     __gm__ uint8_t *tiling)
 {
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__CCE_AICORE__ == 200)

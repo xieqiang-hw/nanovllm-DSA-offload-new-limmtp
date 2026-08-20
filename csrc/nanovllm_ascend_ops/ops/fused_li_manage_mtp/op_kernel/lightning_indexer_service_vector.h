@@ -53,7 +53,8 @@ public:
                                                 GlobalTensor<int32_t> reqPoolEntriesGm,
                                                 GlobalTensor<int32_t> cacheSlotsGm,
                                                 GlobalTensor<int32_t> slotOutGm,
-                                                __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1);
+                                                __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1,
+                                                __gm__ uint8_t *scoreScratch, __gm__ uint8_t *thresholdScratch);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
@@ -71,6 +72,8 @@ protected:
     GlobalTensor<int32_t> slotOutGm;
     GlobalTensor<float> unionPair0Gm;
     GlobalTensor<float> unionPair1Gm;
+    GlobalTensor<float> scoreScratchGm;
+    GlobalTensor<float> thresholdScratchGm;
     // =================================常量区=================================
 
 private:
@@ -213,7 +216,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
                                     GlobalTensor<int32_t> reqPoolEntriesGm,
                                     GlobalTensor<int32_t> cacheSlotsGm,
                                     GlobalTensor<int32_t> slotOutGm,
-                                    __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1)
+                                    __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1,
+                                    __gm__ uint8_t *scoreScratch, __gm__ uint8_t *thresholdScratch)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
@@ -226,6 +230,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
     this->slotOutGm = slotOutGm;
     this->unionPair0Gm.SetGlobalBuffer((__gm__ float *)unionPair0);
     this->unionPair1Gm.SetGlobalBuffer((__gm__ float *)unionPair1);
+    this->scoreScratchGm.SetGlobalBuffer((__gm__ float *)scoreScratch);
+    this->thresholdScratchGm.SetGlobalBuffer((__gm__ float *)thresholdScratch);
 }
 
 template <typename LIT>
@@ -522,6 +528,13 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             LIServiceVec::DoReduce(reduceCacheBuf[REDUCE_BANK_CONFLICT_NUM], reduceOutInner, gRedCnt, s2BaseSize_);
             outQueue_.FreeTensor(reduceCacheBuf);
 
+            uint64_t scoreOffset = (static_cast<uint64_t>(info.bN2Idx) * 4U +
+                                    static_cast<uint32_t>(cuS1Idx)) * cacheSlotsSize_ +
+                                   static_cast<uint32_t>(cuBaseS2Idx);
+            SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+            LIServiceVec::CopyOut(scoreScratchGm[scoreOffset], reduceOutInner, cuS2Len);
+            SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+
             LocalTensor<float> sortScoreUb = reduceOutBuff;
             PipeBarrier<PIPE_V>();
             Duplicate(sortScoreUb.template ReinterpretCast<int32_t>(), LIServiceVec::NEG_INF, cuS2LenVecAlign);
@@ -579,6 +592,9 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
 
             if (needCopyOutGm) {
                 if (!constInfo_.returnValue) {
+                    thresholdScratchGm.SetValue(
+                        static_cast<uint64_t>(info.bN2Idx) * 4U + static_cast<uint32_t>(cuS1Idx),
+                        globalTopkUb_[innerS1Idx * BASE_TOPK * 2].GetValue((BASE_TOPK - 1U) * 2U));
                     LocalTensor<float> valueULocal = outQueue_.AllocTensor<float>();
                     SortTopkBySlotIndex(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], valueULocal,
                                         info.actS2Size > EXACT_PACKED_SOURCE_TOKENS);
@@ -842,6 +858,9 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         LocalTensor<float> outValueUb = ldOutValueBuf_.Get<float>();
         LocalTensor<uint32_t> outIdxUb = ldOutIdxBuf_.Get<uint32_t>();
         if (!constInfo_.returnValue) {
+            thresholdScratchGm.SetValue(
+                static_cast<uint64_t>(outOffset) / BASE_TOPK,
+                curValueIdxUb.GetValue((BASE_TOPK - 1U) * 2U));
             SortTopkBySlotIndex(curValueIdxUb, tmpUb,
                                 s2ActSeq > EXACT_PACKED_SOURCE_TOKENS);
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();

@@ -8,9 +8,13 @@ static ge::graphStatus InferShape(gert::InferShapeContext *context)
     if (topk == nullptr || topk->GetDimNum() != 2)
         return ge::GRAPH_FAILED;
     gert::Shape *ids = context->GetOutputShape(0);
-    gert::Shape *counts = context->GetOutputShape(1);
-    if (ids == nullptr || counts == nullptr) return ge::GRAPH_FAILED;
+    gert::Shape *dst = context->GetOutputShape(1);
+    gert::Shape *evict = context->GetOutputShape(2);
+    gert::Shape *counts = context->GetOutputShape(3);
+    if (ids == nullptr || dst == nullptr || evict == nullptr || counts == nullptr) return ge::GRAPH_FAILED;
     ids->SetDimNum(2); ids->SetDim(0, topk->GetDim(0)); ids->SetDim(1, 8192);
+    *dst = *ids;
+    *evict = *ids;
     counts->SetDimNum(1); counts->SetDim(0, topk->GetDim(0));
     return ge::GRAPH_SUCCESS;
 }
@@ -18,6 +22,8 @@ static ge::graphStatus InferType(gert::InferDataTypeContext *context)
 {
     context->SetOutputDataType(0, ge::DT_INT32);
     context->SetOutputDataType(1, ge::DT_INT32);
+    context->SetOutputDataType(2, ge::DT_INT32);
+    context->SetOutputDataType(3, ge::DT_INT32);
     return ge::GRAPH_SUCCESS;
 }
 IMPL_OP_INFERSHAPE(NanovllmFusedLiManageMtpUnion).InferShape(InferShape).InferDataType(InferType);

@@ -10,12 +10,16 @@ static ge::graphStatus Tiling(gert::TilingContext *context)
     const gert::StorageShape *shape = context->GetInputShape(0);
     if (shape == nullptr || shape->GetStorageShape().GetDimNum() != 2) return ge::GRAPH_FAILED;
     uint32_t batch = static_cast<uint32_t>(shape->GetStorageShape().GetDim(0));
+    const gert::StorageShape *scores = context->GetInputShape(4);
+    if (scores == nullptr || scores->GetStorageShape().GetDimNum() != 2) return ge::GRAPH_FAILED;
+    uint32_t sourceCapacity = static_cast<uint32_t>(scores->GetStorageShape().GetDim(1));
     auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aiv = platform.GetCoreNumAiv();
     context->SetBlockDim(platform.CalcTschBlockDim(std::min(batch, aiv), 0U, aiv));
     context->GetWorkspaceSizes(1)[0] = platform.GetLibApiWorkSpaceSize();
     FusedLiManageMtpUnionTilingData data;
     data.set_batchSize(batch);
+    data.set_sourceCapacity(sourceCapacity);
     data.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(data.GetDataSize());
     context->SetTilingKey(0U);

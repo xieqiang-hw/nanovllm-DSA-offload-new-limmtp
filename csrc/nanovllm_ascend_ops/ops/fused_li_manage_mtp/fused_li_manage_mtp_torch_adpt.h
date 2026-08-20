@@ -71,20 +71,31 @@ inline void npu_fused_li_manage_mtp(
                   miss_dst_slots.device() == device && miss_counts.device() == device,
               "Fused LI Manage MTP tensors must be on the same NPU.");
 
+  auto score_scratch = at::empty(
+      {batch * kMtpWidth, cache_slots_pool.size(1)}, query.options().dtype(at::kFloat));
+  auto threshold_scratch = at::empty(
+      {batch * kMtpWidth}, query.options().dtype(at::kFloat));
+  auto evict_src_scratch = at::empty(
+      {batch, kUnionCapacity}, cache_slots_pool.options());
+
   auto keepalive = std::make_tuple(
       query, index_key_cache, index_weights, req_pool_entries, cache_slots_pool,
       num_cache_tokens, num_candidate_tokens, index_block_table, topk_src_ids,
-      topk_dst_slots, miss_src_ids, miss_dst_slots, miss_counts);
+      topk_dst_slots, miss_src_ids, miss_dst_slots, miss_counts,
+      score_scratch, threshold_scratch, evict_src_scratch);
   EXEC_NPU_CMD_ORDERED(
       aclnnNanovllmFusedLiManageMtp, keepalive,
       query, index_key_cache, index_weights, req_pool_entries,
       cache_slots_pool, num_cache_tokens, num_candidate_tokens,
       index_block_table, topk_src_ids, topk_dst_slots,
-      miss_src_ids, miss_dst_slots, miss_counts, cache_slots_pool);
+      miss_src_ids, miss_dst_slots, miss_counts, cache_slots_pool,
+      score_scratch, threshold_scratch);
   EXEC_NPU_CMD_ORDERED(
       aclnnNanovllmFusedLiManageMtpUnion, keepalive,
       miss_src_ids, miss_dst_slots, topk_dst_slots, num_candidate_tokens,
-      miss_src_ids, miss_counts);
+      score_scratch, threshold_scratch, cache_slots_pool, req_pool_entries,
+      num_cache_tokens, topk_src_ids,
+      miss_src_ids, miss_dst_slots, evict_src_scratch, miss_counts);
 }
 } // namespace vllm_ascend
 #endif
