@@ -101,47 +101,18 @@ private:
 
         uint32_t totalMiss = lengths[0] + lengths[1] + lengths[2] + lengths[3];
         LocalTensor<int32_t> mergedPairs = src.template ReinterpretCast<int32_t>();
-        LocalTensor<int32_t> result = dst.template ReinterpretCast<int32_t>();
-        bool globallySorted = true;
-        int32_t previous = -1;
-        for (uint32_t i = 0; i < totalMiss; ++i) {
-            int32_t current = mergedPairs.GetValue(i * 2U + 1U);
-            if (current < previous) globallySorted = false;
-            previous = current;
-        }
         uint32_t count = 0U;
         int32_t last = -1;
-        if (globallySorted) {
-            for (uint32_t i = 0; i < totalMiss; ++i) {
-                int32_t current = mergedPairs.GetValue(i * 2U + 1U);
-                if (current != last) {
-                    result.SetValue(count++, current);
-                    last = current;
-                }
-            }
-        } else {
-            uint32_t positions[ROUTES] = {0U, 0U, 0U, 0U};
-            int32_t heads[ROUTES] = {INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX};
-            for (uint32_t r = 0; r < ROUTES; ++r) {
-                if (lengths[r] != 0U) heads[r] = ids.GetValue(r * TOPK);
-            }
-            while (positions[0] < lengths[0] || positions[1] < lengths[1] ||
-                   positions[2] < lengths[2] || positions[3] < lengths[3]) {
-                int32_t next = INT32_MAX;
-                for (uint32_t r = 0; r < ROUTES; ++r) next = heads[r] < next ? heads[r] : next;
-                if (next != last) { result.SetValue(count++, next); last = next; }
-                for (uint32_t r = 0; r < ROUTES; ++r) {
-                    if (heads[r] == next) {
-                        ++positions[r];
-                        heads[r] = positions[r] < lengths[r]
-                            ? ids.GetValue(r * TOPK + positions[r]) : INT32_MAX;
-                    }
-                }
+        for (uint32_t i = 0; i < totalMiss; ++i) {
+            int32_t current = mergedPairs.GetValue(i * 2U + 1U);
+            if (current != last) {
+                ids.SetValue(count++, current);
+                last = current;
             }
         }
         if (count != 0U) {
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-            DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], result,
+            DataCopyPad(outGm[static_cast<uint64_t>(b) * CAPACITY], ids,
                         {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
             SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
