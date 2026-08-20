@@ -55,6 +55,7 @@ class LIPreload {
 public:
     __aicore__ inline LIPreload(){};
     __aicore__ inline void Init(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
+                                __gm__ uint8_t *reqPoolEntries, __gm__ uint8_t *cacheSlots,
                                 __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                 __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
                                 __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling, TPipe *tPipe);
@@ -103,6 +104,9 @@ protected:
 
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<K_T> valueOutGm;
+    GlobalTensor<int32_t> reqPoolEntriesGm;
+    GlobalTensor<int32_t> cacheSlotsGm;
+    GlobalTensor<int32_t> slotOutGm;
     GlobalTensor<int32_t> blockTableGm;
 
     GlobalTensor<uint32_t> actualSeqLengthsGmQ;
@@ -376,6 +380,7 @@ __aicore__ inline void LIPreload<LIT>::DealActSeqLenIsZero(uint32_t bIdx, uint32
 
 template <typename LIT>
 __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
+                                            __gm__ uint8_t *reqPoolEntries, __gm__ uint8_t *cacheSlots,
                                             __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                             __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
                                             __gm__ uint8_t *workspace, const FusedLiManageTilingData *__restrict tiling,
@@ -421,8 +426,12 @@ __aicore__ inline void LIPreload<LIT>::Init(__gm__ uint8_t *query, __gm__ uint8_
         vectorService.InitParams(constInfo, tiling);
         indiceOutGm.SetGlobalBuffer((__gm__ int32_t *)sparseIndices);
         valueOutGm.SetGlobalBuffer((__gm__ K_T *)sparseValues);
+        reqPoolEntriesGm.SetGlobalBuffer((__gm__ int32_t *)reqPoolEntries);
+        cacheSlotsGm.SetGlobalBuffer((__gm__ int32_t *)cacheSlots);
+        slotOutGm.SetGlobalBuffer((__gm__ int32_t *)sparseValues);
         weightsGm.SetGlobalBuffer((__gm__ K_T *)weights);
-        vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, vec1ParamGm, weightsGm, indiceOutGm, valueOutGm);
+        vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, vec1ParamGm, weightsGm, indiceOutGm, valueOutGm,
+                                           reqPoolEntriesGm, cacheSlotsGm, slotOutGm);
     } else {
         matmulService.InitParams(constInfo);
         queryGm.SetGlobalBuffer((__gm__ Q_T *)query);

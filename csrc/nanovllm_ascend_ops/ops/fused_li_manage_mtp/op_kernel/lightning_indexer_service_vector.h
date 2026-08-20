@@ -48,7 +48,10 @@ public:
                                       const FusedLiManageTilingData *__restrict tilingData);
     __aicore__ inline void InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<float> vec1ResGm,
                                                 GlobalTensor<int64_t> vec1ParamGm, GlobalTensor<K_T> weightsGm,
-                                                GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm);
+                                                GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm,
+                                                GlobalTensor<int32_t> reqPoolEntriesGm,
+                                                GlobalTensor<int32_t> cacheSlotsGm,
+                                                GlobalTensor<int32_t> slotOutGm);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
@@ -61,6 +64,9 @@ protected:
     GlobalTensor<K_T> weightsGm;
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<K_T> valueOutGm;
+    GlobalTensor<int32_t> reqPoolEntriesGm;
+    GlobalTensor<int32_t> cacheSlotsGm;
+    GlobalTensor<int32_t> slotOutGm;
     // =================================常量区=================================
 
 private:
@@ -104,6 +110,11 @@ private:
     constexpr static uint32_t REDUCE_BANK_CONFLICT_NUM = REDUCE_BANK_CONFLICT_OFFSETS / sizeof(float);
 
     struct LICommon::ConstInfo constInfo_;
+    uint32_t cacheSlotsSize_ = 0;
+
+    __aicore__ inline void ResolveTopkHitMiss(const LocalTensor<int32_t> &indexLocal,
+                                              const LocalTensor<int32_t> &slotLocal,
+                                              int64_t outputOffset);
 };
 
 template <typename LIT>
@@ -170,6 +181,7 @@ __aicore__ inline void LIVector<LIT>::InitParams(const struct LICommon::ConstInf
     // define MMBase para
     s1BaseSize_ = constInfo.s1BaseSize;
     s2BaseSize_ = constInfo.s2BaseSize;
+    cacheSlotsSize_ = tilingData->cacheSlotsSize;
 
     // group ub 切分因子当前按照UB空间强制为16
     groupInner_ = 16;
@@ -181,7 +193,10 @@ template <typename LIT>
 __aicore__ inline void
 LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<float> vec1ResGm,
                                     GlobalTensor<int64_t> vec1ParamGm, GlobalTensor<K_T> weightsGm,
-                                    GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm)
+                                    GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm,
+                                    GlobalTensor<int32_t> reqPoolEntriesGm,
+                                    GlobalTensor<int32_t> cacheSlotsGm,
+                                    GlobalTensor<int32_t> slotOutGm)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
@@ -189,6 +204,37 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
     this->weightsGm = weightsGm;
     this->indiceOutGm = indiceOutGm;
     this->valueOutGm = valueOutGm;
+    this->reqPoolEntriesGm = reqPoolEntriesGm;
+    this->cacheSlotsGm = cacheSlotsGm;
+    this->slotOutGm = slotOutGm;
+}
+
+template <typename LIT>
+__aicore__ inline void LIVector<LIT>::ResolveTopkHitMiss(
+    const LocalTensor<int32_t> &indexLocal, const LocalTensor<int32_t> &slotLocal,
+    int64_t outputOffset)
+{
+    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+    uint32_t routeIdx = static_cast<uint32_t>(outputOffset / constInfo_.sparseCount);
+    uint32_t batchIdx = routeIdx / constInfo_.qSeqSize;
+    int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(batchIdx);
+    uint64_t cacheRowBase = static_cast<uint64_t>(cacheRowIdx) * cacheSlotsSize_;
+    for (uint32_t topkIdx = 0; topkIdx < constInfo_.sparseCount; ++topkIdx) {
+        int32_t sourceIdx = indexLocal.GetValue(topkIdx);
+        int32_t slot = constInfo_.INVALID_IDX;
+        if (sourceIdx >= 0 && static_cast<uint32_t>(sourceIdx) < cacheSlotsSize_) {
+            slot = cacheSlotsGm.GetValue(cacheRowBase + static_cast<uint32_t>(sourceIdx));
+        }
+        if (slot < 0) {
+            slot = constInfo_.INVALID_IDX;
+        }
+        slotLocal.SetValue(topkIdx, slot);
+        if (slot >= 0) {
+            indexLocal.SetValue(topkIdx, constInfo_.INVALID_IDX);
+        }
+    }
+    SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+    LIServiceVec::CopyOut(slotOutGm[outputOffset], slotLocal, constInfo_.sparseCount);
 }
 
 template <typename LIT>
@@ -384,11 +430,13 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                     ExtractIndex(idxULocal, globalTopkUb_[innerS1Idx * BASE_TOPK * 2].template ReinterpretCast<uint32_t>(),
                                 BASE_TOPK);
                     PipeBarrier<PIPE_V>();
+                    int64_t outputOffset = info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount;
+                    ResolveTopkHitMiss(idxULocal.template ReinterpretCast<int32_t>(),
+                                       valueULocal.template ReinterpretCast<int32_t>(), outputOffset);
                     InitSortOutBuf(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], BASE_TOPK * 2);
                     outQueue_.EnQue<float>(valueULocal);
                     valueULocal = outQueue_.DeQue<float>();
                     LocalTensor<int32_t> idxULocal1 = valueULocal.template ReinterpretCast<int32_t>()[BASE_TOPK];
-                    int64_t outputOffset = info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount;
                     LIServiceVec::CopyOut(indiceOutGm[outputOffset], idxULocal1, constInfo_.sparseCount);
                     outQueue_.FreeTensor(valueULocal);
                 } else {
@@ -639,6 +687,7 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         if (!constInfo_.returnValue) {
             Extract(outValueUb, outIdxUb, curValueIdxUb, (BASE_TOPK / 32));
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();
+            ResolveTopkHitMiss(idxULocal1, outValueUb.template ReinterpretCast<int32_t>(), outOffset);
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
             DataCopyPad(indiceOutGm[outOffset], idxULocal1,

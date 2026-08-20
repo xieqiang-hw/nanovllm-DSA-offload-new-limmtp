@@ -111,17 +111,40 @@ def main() -> None:
     if not callable(getattr(torch_npu, "npu_lightning_indexer", None)):
         raise RuntimeError("torch_npu.npu_lightning_indexer is unavailable")
     case = make_case(args)
-    old_cache = case["cache_slots"].clone()
     reference = call_standard(case).reshape(args.batch_size * MTP_WIDTH, TOPK)
+
+    # Build a deterministic mixed hit/miss cache from the standard TopK itself.
+    # This guarantees coverage of legal slot 0 without making every TopK token a hit.
+    cached_per_request = min(args.cache_tokens, TOPK // 2)
+    for batch_idx in range(args.batch_size):
+        route0 = reference[batch_idx * MTP_WIDTH]
+        cached_ids = route0[:cached_per_request]
+        case["cache_slots"][batch_idx, cached_ids] = torch.arange(
+            cached_per_request, dtype=torch.int32, device=case["query"].device
+        )
+    old_cache = case["cache_slots"].clone()
+
+    reference_slots = []
+    for route_idx in range(args.batch_size * MTP_WIDTH):
+        batch_idx = route_idx // MTP_WIDTH
+        reference_slots.append(case["cache_slots"][batch_idx, reference[route_idx].long()])
+    reference_slots = torch.stack(reference_slots)
+    expected_src = torch.where(reference_slots >= 0, -1, reference)
+
     call_mtp(case)
     torch.npu.synchronize()
 
     actual = case["topk_src"].reshape(args.batch_size * MTP_WIDTH, TOPK)
-    ref_sorted = torch.sort(reference, dim=-1).values
-    actual_sorted = torch.sort(actual, dim=-1).values
-    mismatch = int((ref_sorted != actual_sorted).sum().item())
-    if mismatch:
-        raise AssertionError(f"MTP TopK differs from standard LightningIndexer: mismatched_positions={mismatch}")
+    actual_slots = case["topk_dst"].reshape(args.batch_size * MTP_WIDTH, TOPK)
+    src_mismatch = int((expected_src != actual).sum().item())
+    slot_mismatch = int((reference_slots != actual_slots).sum().item())
+    if src_mismatch or slot_mismatch:
+        raise AssertionError(
+            "MTP TopK hit/miss differs from the standard-LI-derived reference: "
+            f"src_mismatches={src_mismatch}, slot_mismatches={slot_mismatch}"
+        )
+    if int((actual_slots == 0).sum().item()) == 0:
+        raise AssertionError("test case did not exercise legal HBM slot 0")
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError("phase-1 MTP TopK modified cache_slots_pool")
     standard_mean, standard_p50 = benchmark(lambda: call_standard(case), args.warmup, args.iters)
@@ -132,7 +155,7 @@ def main() -> None:
         f"batch={args.batch_size} routes=4 seq_len={args.seq_len} dtype={args.dtype} "
         f"standard_mean_us={standard_mean:.3f} standard_p50_us={standard_p50:.3f} "
         f"mtp_mean_us={mtp_mean:.3f} mtp_p50_us={mtp_p50:.3f} ratio={ratio:.4f} "
-        f"warmup={args.warmup} iters={args.iters} topk_match=1 cache_unchanged=1",
+        f"warmup={args.warmup} iters={args.iters} topk_hit_miss_match=1 cache_unchanged=1",
         flush=True,
     )
     if ratio > args.max_latency_ratio:

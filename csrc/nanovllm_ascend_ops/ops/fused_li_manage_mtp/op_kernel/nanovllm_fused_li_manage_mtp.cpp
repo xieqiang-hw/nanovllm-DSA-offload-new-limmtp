@@ -18,7 +18,8 @@ using namespace LIKernel;
     do {                                                                                                               \
         LI_MTP_COPY_TILING();                                                                                           \
         LIPreload<LIType<__VA_ARGS__, int32_t, true, LI_LAYOUT::BSND, LI_LAYOUT::PA_BSND>> op;                          \
-        op.Init(query, key, weights, nullptr, actualSeqLengths, blockTable, topkIndex, topkSlots,                      \
+        op.Init(query, key, weights, reqPoolEntries, cacheSlots, nullptr, actualSeqLengths, blockTable,              \
+                topkIndex, topkSlots,                                                                                 \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
     } while (0)
@@ -41,8 +42,6 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
     (void)missDstSlots;
     (void)missCount;
     (void)cacheSlotsOut;
-    (void)reqPoolEntries;
-    (void)cacheSlots;
     (void)cacheTokens;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
