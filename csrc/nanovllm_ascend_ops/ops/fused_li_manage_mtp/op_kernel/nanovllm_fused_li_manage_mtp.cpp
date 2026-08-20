@@ -30,7 +30,8 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
             uint64_t initElements = MAX_INIT_ELEMENTS < remainingCoreElements
                 ? static_cast<uint64_t>(MAX_INIT_ELEMENTS)
                 : remainingCoreElements;
-            AscendC::InitGlobalMemory(topkSlotsGm[coreStart + offset], initElements, -1);
+            GlobalTensor<int32_t> topkSlotsSlice = topkSlotsGm[coreStart + offset];
+            AscendC::InitGlobalMemory(topkSlotsSlice, initElements, -1);
         }
         if (GetBlockIdx() == 0U) {
             GlobalTensor<int32_t> missCountGm;
