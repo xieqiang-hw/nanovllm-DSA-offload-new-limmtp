@@ -28,6 +28,7 @@ using namespace LICommon;
 using namespace LIServiceVec;
 constexpr uint32_t BASE_TOPK = 2048;
 constexpr uint32_t LD_PARAM_NUM = 16;
+constexpr uint32_t EXACT_PACKED_SOURCE_TOKENS = 1U << INDEX_BITS;
 
 template <typename LIT>
 class LIVector {
@@ -112,9 +113,16 @@ private:
     struct LICommon::ConstInfo constInfo_;
     uint32_t cacheSlotsSize_ = 0;
 
-    __aicore__ inline void ResolveTopkHitMiss(const LocalTensor<int32_t> &indexLocal,
-                                              const LocalTensor<int32_t> &slotLocal,
-                                              int64_t outputOffset);
+    __aicore__ inline void PrepareChunkPayload(const LocalTensor<int32_t> &payloadLocal,
+                                               const LocalTensor<float> &scoreLocal,
+                                               uint32_t batchIdx, int32_t sourceBase,
+                                               int32_t validLen, int32_t alignedLen,
+                                               bool hasLongIndexTag);
+    __aicore__ inline void DecodeTopkHitMiss(const LocalTensor<float> &pairLocal,
+                                             const LocalTensor<int32_t> &indexLocal,
+                                             const LocalTensor<int32_t> &slotLocal,
+                                             const LocalTensor<int32_t> &scratchLocal,
+                                             int64_t outputOffset, bool hasLongIndexTag);
 };
 
 template <typename LIT>
@@ -210,26 +218,63 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
 }
 
 template <typename LIT>
-__aicore__ inline void LIVector<LIT>::ResolveTopkHitMiss(
-    const LocalTensor<int32_t> &indexLocal, const LocalTensor<int32_t> &slotLocal,
-    int64_t outputOffset)
+__aicore__ inline void LIVector<LIT>::PrepareChunkPayload(
+    const LocalTensor<int32_t> &payloadLocal, const LocalTensor<float> &scoreLocal,
+    uint32_t batchIdx, int32_t sourceBase, int32_t validLen, int32_t alignedLen,
+    bool hasLongIndexTag)
 {
-    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
-    uint32_t routeIdx = static_cast<uint32_t>(outputOffset / constInfo_.sparseCount);
-    uint32_t batchIdx = routeIdx / constInfo_.qSeqSize;
+    Duplicate(payloadLocal, constInfo_.INVALID_IDX, alignedLen);
+    PipeBarrier<PIPE_V>();
+    SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     int32_t cacheRowIdx = reqPoolEntriesGm.GetValue(batchIdx);
     uint64_t cacheRowBase = static_cast<uint64_t>(cacheRowIdx) * cacheSlotsSize_;
+    DataCopyPad(payloadLocal, cacheSlotsGm[cacheRowBase + static_cast<uint32_t>(sourceBase)],
+                AscendC::DataCopyExtParams{1, static_cast<uint32_t>(validLen * sizeof(int32_t)), 0, 0, 0},
+                AscendC::DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
+    SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+
+    Maxs(payloadLocal, payloadLocal, constInfo_.INVALID_IDX, validLen);
+    PipeBarrier<PIPE_V>();
+    ShiftLeft(payloadLocal.template ReinterpretCast<uint32_t>(),
+              payloadLocal.template ReinterpretCast<uint32_t>(), INDEX_BITS, validLen);
+    PipeBarrier<PIPE_V>();
+    Add(payloadLocal, payloadLocal, globalTopkIndice_, validLen);
+    PipeBarrier<PIPE_V>();
+    Adds(payloadLocal, payloadLocal, sourceBase & static_cast<int32_t>((1U << INDEX_BITS) - 1U), validLen);
+    PipeBarrier<PIPE_V>();
+
+    if (hasLongIndexTag) {
+        LocalTensor<uint32_t> scoreBits = scoreLocal.template ReinterpretCast<uint32_t>();
+        ShiftRight(scoreBits, scoreBits, SCORE_TAG_CLEAR_SHIFT, validLen);
+        PipeBarrier<PIPE_V>();
+        ShiftLeft(scoreBits, scoreBits, SCORE_TAG_CLEAR_SHIFT, validLen);
+        PipeBarrier<PIPE_V>();
+        Adds(scoreBits.template ReinterpretCast<int32_t>(), scoreBits.template ReinterpretCast<int32_t>(),
+             (sourceBase >> INDEX_BITS) & ((1 << INDEX_HIGH_BITS) - 1), validLen);
+        PipeBarrier<PIPE_V>();
+    }
+}
+
+template <typename LIT>
+__aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
+    const LocalTensor<float> &pairLocal, const LocalTensor<int32_t> &indexLocal,
+    const LocalTensor<int32_t> &slotLocal, const LocalTensor<int32_t> &scratchLocal,
+    int64_t outputOffset, bool hasLongIndexTag)
+{
+    ExtractIndex(indexLocal.template ReinterpretCast<uint32_t>(),
+                 pairLocal.template ReinterpretCast<uint32_t>(), constInfo_.sparseCount);
+    DecodePackedSlot(slotLocal, indexLocal.template ReinterpretCast<uint32_t>(),
+                     scratchLocal, constInfo_.sparseCount);
+    if (hasLongIndexTag) {
+        ExtractScoreBits(scratchLocal.template ReinterpretCast<uint32_t>(),
+                         pairLocal.template ReinterpretCast<uint32_t>(), constInfo_.sparseCount);
+    }
+    DecodePackedIndex(indexLocal.template ReinterpretCast<uint32_t>(),
+                      scratchLocal.template ReinterpretCast<uint32_t>(),
+                      constInfo_.sparseCount, hasLongIndexTag);
+    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     for (uint32_t topkIdx = 0; topkIdx < constInfo_.sparseCount; ++topkIdx) {
-        int32_t sourceIdx = indexLocal.GetValue(topkIdx);
-        int32_t slot = constInfo_.INVALID_IDX;
-        if (sourceIdx >= 0 && static_cast<uint32_t>(sourceIdx) < cacheSlotsSize_) {
-            slot = cacheSlotsGm.GetValue(cacheRowBase + static_cast<uint32_t>(sourceIdx));
-        }
-        if (slot < 0) {
-            slot = constInfo_.INVALID_IDX;
-        }
-        slotLocal.SetValue(topkIdx, slot);
-        if (slot >= 0) {
+        if (slotLocal.GetValue(topkIdx) >= 0) {
             indexLocal.SetValue(topkIdx, constInfo_.INVALID_IDX);
         }
     }
@@ -364,20 +409,15 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             outQueue_.FreeTensor(reduceCacheBuf);
 
             LocalTensor<float> sortScoreUb = reduceOutBuff;
-            LocalTensor<float> sortIndiceUb = reduceOutBuff[cuS2LenVecAlign];
             PipeBarrier<PIPE_V>();
             Duplicate(sortScoreUb.template ReinterpretCast<int32_t>(), LIServiceVec::NEG_INF, cuS2LenVecAlign);
             PipeBarrier<PIPE_V>();
             Adds(sortScoreUb, reduceOutInner, 0.0f, cuS2Len);
             PipeBarrier<PIPE_V>();
-            LocalTensor<int32_t> sortIndiceUbInt = sortIndiceUb.template ReinterpretCast<int32_t>();
-            // 无效数据索引填充为-1
-            if (cuS2LenVecAlign != cuS2Len) {
-                Duplicate(sortIndiceUbInt, -1, cuS2LenVecAlign);
-            }
-            PipeBarrier<PIPE_V>();
-            Adds(sortIndiceUbInt, globalTopkIndice_, static_cast<int32_t>(cuBaseS2Idx), cuS2Len);
-            PipeBarrier<PIPE_V>();
+            bool hasLongIndexTag = info.actS2Size > EXACT_PACKED_SOURCE_TOKENS;
+            LocalTensor<int32_t> payloadLocal = reduceOutBuff[cuS2LenVecAlign].template ReinterpretCast<int32_t>();
+            PrepareChunkPayload(payloadLocal, sortScoreUb, info.bIdx, cuBaseS2Idx,
+                                cuS2Len, cuS2LenVecAlign, hasLongIndexTag);
 
             LocalTensor<float> tmpSortBuf = outQueue_.AllocTensor<float>();
             if (info.actS1Size > 4) {
@@ -391,7 +431,7 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                 int64_t globalTopkUbCacheIdx = (info.s2Idx - blockS2StartIdx_) % 4;
                 Sort<float, true>(
                     SortedBasicBlock_[innerS1Idx * BASE_TOPK * 2 + globalTopkUbCacheIdx * s2BaseSize_ * 2],
-                    reduceOutBuff, sortIndiceUbInt.template ReinterpretCast<uint32_t>(), tmpSortBuf,
+                    reduceOutBuff, payloadLocal.template ReinterpretCast<uint32_t>(), tmpSortBuf,
                     cuS2LenVecAlign / 32);
                 // 缓存4块512或者S2结束, 需要进行精排
                 if (globalTopkUbCacheIdx == 3 || isS2End || info.isAllLoopEnd) {
@@ -426,13 +466,13 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             if (needCopyOutGm) {
                 if (!constInfo_.returnValue) {
                     LocalTensor<float> valueULocal = outQueue_.AllocTensor<float>();
-                    LocalTensor<uint32_t> idxULocal = valueULocal.template ReinterpretCast<uint32_t>()[BASE_TOPK];
-                    ExtractIndex(idxULocal, globalTopkUb_[innerS1Idx * BASE_TOPK * 2].template ReinterpretCast<uint32_t>(),
-                                BASE_TOPK);
-                    PipeBarrier<PIPE_V>();
+                    LocalTensor<int32_t> slotLocal = valueULocal.template ReinterpretCast<int32_t>();
+                    LocalTensor<int32_t> indexLocal = valueULocal.template ReinterpretCast<int32_t>()[BASE_TOPK];
+                    LocalTensor<int32_t> scratchLocal = valueULocal.template ReinterpretCast<int32_t>()[BASE_TOPK * 2];
                     int64_t outputOffset = info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount;
-                    ResolveTopkHitMiss(idxULocal.template ReinterpretCast<int32_t>(),
-                                       valueULocal.template ReinterpretCast<int32_t>(), outputOffset);
+                    DecodeTopkHitMiss(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], indexLocal,
+                                      slotLocal, scratchLocal, outputOffset,
+                                      info.actS2Size > EXACT_PACKED_SOURCE_TOKENS);
                     InitSortOutBuf(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], BASE_TOPK * 2);
                     outQueue_.EnQue<float>(valueULocal);
                     valueULocal = outQueue_.DeQue<float>();
@@ -602,6 +642,7 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         tmpCubeId++;
         wsInfoOffset = tmpCubeId * s1BaseSize_ * 2 * paramNum_ + innerS1Idx * 2 * paramNum_;
         needFd = vec1ParamGm.GetValue(wsInfoOffset);
+        s2ActSeq = vec1ParamGm.GetValue(wsInfoOffset + 1);
         isS2End = vec1ParamGm.GetValue(wsInfoOffset + 4);
         s1Idx = vec1ParamGm.GetValue(wsInfoOffset + 6);
         outOffset = vec1ParamGm.GetValue(wsInfoOffset + 8);
@@ -685,9 +726,11 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         LocalTensor<float> outValueUb = ldOutValueBuf_.Get<float>();
         LocalTensor<uint32_t> outIdxUb = ldOutIdxBuf_.Get<uint32_t>();
         if (!constInfo_.returnValue) {
-            Extract(outValueUb, outIdxUb, curValueIdxUb, (BASE_TOPK / 32));
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();
-            ResolveTopkHitMiss(idxULocal1, outValueUb.template ReinterpretCast<int32_t>(), outOffset);
+            DecodeTopkHitMiss(curValueIdxUb, idxULocal1,
+                              outValueUb.template ReinterpretCast<int32_t>(),
+                              tmpUb.template ReinterpretCast<int32_t>(), outOffset,
+                              s2ActSeq > EXACT_PACKED_SOURCE_TOKENS);
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
             DataCopyPad(indiceOutGm[outOffset], idxULocal1,

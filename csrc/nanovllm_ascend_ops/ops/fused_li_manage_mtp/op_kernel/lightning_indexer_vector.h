@@ -21,6 +21,15 @@
 namespace LIServiceVec {
 using namespace AscendC;
 
+constexpr uint32_t INDEX_BITS = 18;
+constexpr uint32_t INDEX_MASK_SHIFT = 32U - INDEX_BITS;
+constexpr uint32_t INDEX_HIGH_BITS = 3;
+constexpr uint32_t SCORE_TAG_CLEAR_SHIFT = INDEX_HIGH_BITS;
+constexpr uint32_t SCORE_TAG_EXTRACT_SHIFT = 32U - INDEX_HIGH_BITS;
+constexpr uint32_t INVALID_FLAG_SHIFT = 14;
+constexpr int32_t INVALID_SLOT14 = (1 << INVALID_FLAG_SHIFT) - 1;
+constexpr int32_t INVALID_SLOT_DELTA = -16384;
+
 constexpr int32_t NEG_INF = 0xFF800000;
 constexpr int32_t INVALID_INDEX = -1;
 constexpr uint8_t VEC_REPEAT_MAX = 255;
@@ -376,6 +385,59 @@ __aicore__ inline void ExtractIndex(const LocalTensor<uint32_t> &idxULocal, cons
     uint8_t src1Pattern = 2; // 固定模式2,表示筛选出奇数索引的数
     AscendC::GatherMask(idxULocal, sortLocal, src1Pattern, false, static_cast<uint32_t>(0), gatherMaskParams, rsvdCnt);
     AscendC::PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void ExtractScoreBits(const LocalTensor<uint32_t> &scoreBitsLocal,
+                                        const LocalTensor<uint32_t> &sortLocal, int64_t extractNum)
+{
+    AscendC::GatherMaskParams params;
+    params.repeatTimes = Ceil(extractNum * sizeof(float) * VALUE_AND_INDEX_NUM, VEC_REPEAT_BYTES);
+    params.src0BlockStride = 1;
+    params.src0RepeatStride = B32_VEC_REPEAT_STRIDE;
+    params.src1RepeatStride = 0;
+    uint64_t rsvdCnt = 0;
+    AscendC::GatherMask(scoreBitsLocal, sortLocal, static_cast<uint8_t>(1), false,
+                        static_cast<uint32_t>(0), params, rsvdCnt);
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void DecodePackedSlot(const LocalTensor<int32_t> &slotLocal,
+                                        const LocalTensor<uint32_t> &payloadLocal,
+                                        const LocalTensor<int32_t> &scratchLocal, int64_t count)
+{
+    AscendC::ShiftRight(slotLocal.template ReinterpretCast<uint32_t>(), payloadLocal, INDEX_BITS, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Adds(scratchLocal, slotLocal, static_cast<int32_t>(1), count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::ShiftRight(scratchLocal.template ReinterpretCast<uint32_t>(),
+                        scratchLocal.template ReinterpretCast<uint32_t>(), INVALID_FLAG_SHIFT, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Muls(scratchLocal, scratchLocal, INVALID_SLOT_DELTA, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Add(slotLocal, slotLocal, scratchLocal, count);
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void DecodePackedIndex(const LocalTensor<uint32_t> &indexLocal,
+                                         const LocalTensor<uint32_t> &scoreTagLocal, int64_t count,
+                                         bool hasLongIndexTag)
+{
+    AscendC::ShiftLeft(indexLocal, indexLocal, INDEX_MASK_SHIFT, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::ShiftRight(indexLocal, indexLocal, INDEX_MASK_SHIFT, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    if (hasLongIndexTag) {
+        AscendC::ShiftLeft(scoreTagLocal, scoreTagLocal, SCORE_TAG_EXTRACT_SHIFT, count);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::ShiftRight(scoreTagLocal, scoreTagLocal, SCORE_TAG_EXTRACT_SHIFT, count);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::ShiftLeft(scoreTagLocal, scoreTagLocal, INDEX_BITS, count);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Add(indexLocal.template ReinterpretCast<int32_t>(),
+                     indexLocal.template ReinterpretCast<int32_t>(),
+                     scoreTagLocal.template ReinterpretCast<int32_t>(), count);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
 }
 
 
