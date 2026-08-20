@@ -129,14 +129,20 @@ def main() -> None:
         batch_idx = route_idx // MTP_WIDTH
         reference_slots.append(case["cache_slots"][batch_idx, reference[route_idx].long()])
     reference_slots = torch.stack(reference_slots)
+    # Lexicographic order: miss group first (slot < 0), then source ID ascending.
+    reorder_key = (reference_slots >= 0).to(torch.int64) * (args.seq_len + 1)
+    reorder_key = reorder_key + reference.to(torch.int64)
+    reorder = torch.argsort(reorder_key, dim=-1)
+    expected_src = torch.gather(reference, 1, reorder)
+    expected_slots = torch.gather(reference_slots, 1, reorder)
 
     call_mtp(case)
     torch.npu.synchronize()
 
     actual = case["topk_src"].reshape(args.batch_size * MTP_WIDTH, TOPK)
     actual_slots = case["topk_dst"].reshape(args.batch_size * MTP_WIDTH, TOPK)
-    src_mismatch = int((reference != actual).sum().item())
-    slot_mismatch = int((reference_slots != actual_slots).sum().item())
+    src_mismatch = int((expected_src != actual).sum().item())
+    slot_mismatch = int((expected_slots != actual_slots).sum().item())
     if src_mismatch or slot_mismatch:
         raise AssertionError(
             "MTP TopK hit/miss differs from the standard-LI-derived reference: "
@@ -154,7 +160,7 @@ def main() -> None:
         f"batch={args.batch_size} routes=4 seq_len={args.seq_len} dtype={args.dtype} "
         f"standard_mean_us={standard_mean:.3f} standard_p50_us={standard_p50:.3f} "
         f"mtp_mean_us={mtp_mean:.3f} mtp_p50_us={mtp_p50:.3f} ratio={ratio:.4f} "
-        f"warmup={args.warmup} iters={args.iters} topk_hit_miss_match=1 cache_unchanged=1",
+        f"warmup={args.warmup} iters={args.iters} topk_hit_miss_reorder_match=1 cache_unchanged=1",
         flush=True,
     )
     if ratio > args.max_latency_ratio:

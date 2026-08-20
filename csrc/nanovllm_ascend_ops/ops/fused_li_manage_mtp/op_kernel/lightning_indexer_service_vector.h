@@ -124,6 +124,9 @@ private:
                                              const LocalTensor<int32_t> &slotLocal,
                                              const LocalTensor<int32_t> &scratchLocal,
                                              int64_t outputOffset, bool hasLongIndexTag);
+    __aicore__ inline void SortTopkBySlotIndex(const LocalTensor<float> &pairLocal,
+                                               const LocalTensor<float> &workspaceLocal,
+                                               bool hasLongIndexTag);
 };
 
 template <typename LIT>
@@ -261,6 +264,77 @@ __aicore__ inline void LIVector<LIT>::TagLongIndex(
 }
 
 template <typename LIT>
+__aicore__ inline void LIVector<LIT>::SortTopkBySlotIndex(
+    const LocalTensor<float> &pairLocal, const LocalTensor<float> &workspaceLocal,
+    bool hasLongIndexTag)
+{
+    constexpr int32_t HIT_KEY_BASE_BITS = static_cast<int32_t>(0x3F800000U);
+    constexpr int32_t MISS_KEY_DELTA_BITS = static_cast<int32_t>(0x00800000U);
+    constexpr int32_t SHORT_INDEX_MASK = (1 << INDEX_BITS) - 1;
+    constexpr int32_t LONG_INDEX_MASK = (1 << (INDEX_BITS + INDEX_HIGH_BITS)) - 1;
+    LocalTensor<float> keyLocal = workspaceLocal;
+    LocalTensor<uint32_t> payloadLocal = workspaceLocal[BASE_TOPK].template ReinterpretCast<uint32_t>();
+    LocalTensor<int32_t> missFlagLocal = workspaceLocal[BASE_TOPK * 2].template ReinterpretCast<int32_t>();
+    LocalTensor<float> sortTmpLocal = workspaceLocal[BASE_TOPK * 2];
+
+    ExtractIndex(payloadLocal, pairLocal.template ReinterpretCast<uint32_t>(), BASE_TOPK);
+    ShiftLeft(keyLocal.template ReinterpretCast<uint32_t>(), payloadLocal,
+              32U - INDEX_BITS, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    ShiftRight(keyLocal.template ReinterpretCast<uint32_t>(),
+               keyLocal.template ReinterpretCast<uint32_t>(),
+               32U - INDEX_BITS, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    if (hasLongIndexTag) {
+        ExtractScoreBits(missFlagLocal.template ReinterpretCast<uint32_t>(),
+                         pairLocal.template ReinterpretCast<uint32_t>(), BASE_TOPK);
+        ShiftLeft(missFlagLocal.template ReinterpretCast<uint32_t>(),
+                  missFlagLocal.template ReinterpretCast<uint32_t>(),
+                  SCORE_TAG_EXTRACT_SHIFT, BASE_TOPK);
+        PipeBarrier<PIPE_V>();
+        ShiftRight(missFlagLocal.template ReinterpretCast<uint32_t>(),
+                   missFlagLocal.template ReinterpretCast<uint32_t>(),
+                   SCORE_TAG_EXTRACT_SHIFT, BASE_TOPK);
+        PipeBarrier<PIPE_V>();
+        ShiftLeft(missFlagLocal.template ReinterpretCast<uint32_t>(),
+                  missFlagLocal.template ReinterpretCast<uint32_t>(), INDEX_BITS, BASE_TOPK);
+        PipeBarrier<PIPE_V>();
+        Add(keyLocal.template ReinterpretCast<int32_t>(),
+            keyLocal.template ReinterpretCast<int32_t>(), missFlagLocal, BASE_TOPK);
+        PipeBarrier<PIPE_V>();
+    }
+    Muls(keyLocal.template ReinterpretCast<int32_t>(),
+         keyLocal.template ReinterpretCast<int32_t>(), -1, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    Adds(keyLocal.template ReinterpretCast<int32_t>(),
+         keyLocal.template ReinterpretCast<int32_t>(),
+         hasLongIndexTag ? LONG_INDEX_MASK : SHORT_INDEX_MASK, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+
+    ShiftRight(missFlagLocal.template ReinterpretCast<uint32_t>(), payloadLocal,
+               INDEX_BITS, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    Adds(missFlagLocal, missFlagLocal, 1, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    ShiftRight(missFlagLocal.template ReinterpretCast<uint32_t>(),
+               missFlagLocal.template ReinterpretCast<uint32_t>(),
+               INVALID_FLAG_SHIFT, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    Muls(missFlagLocal, missFlagLocal, MISS_KEY_DELTA_BITS, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    Add(keyLocal.template ReinterpretCast<int32_t>(),
+        keyLocal.template ReinterpretCast<int32_t>(), missFlagLocal, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+    Adds(keyLocal.template ReinterpretCast<int32_t>(),
+         keyLocal.template ReinterpretCast<int32_t>(), HIT_KEY_BASE_BITS, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+
+    LocalTensor<float> sortedPair = pairLocal;
+    LIServiceVec::SortAll(sortedPair, keyLocal, payloadLocal, sortTmpLocal, BASE_TOPK);
+    PipeBarrier<PIPE_V>();
+}
+
+template <typename LIT>
 __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
     const LocalTensor<float> &pairLocal, const LocalTensor<int32_t> &indexLocal,
     const LocalTensor<int32_t> &slotLocal, const LocalTensor<int32_t> &scratchLocal,
@@ -270,13 +344,31 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
                  pairLocal.template ReinterpretCast<uint32_t>(), constInfo_.sparseCount);
     DecodePackedSlot(slotLocal, indexLocal.template ReinterpretCast<uint32_t>(),
                      scratchLocal, constInfo_.sparseCount);
+    DecodePackedIndex(indexLocal.template ReinterpretCast<uint32_t>(),
+                      scratchLocal.template ReinterpretCast<uint32_t>(),
+                      constInfo_.sparseCount, false);
     if (hasLongIndexTag) {
         ExtractScoreBits(scratchLocal.template ReinterpretCast<uint32_t>(),
                          pairLocal.template ReinterpretCast<uint32_t>(), constInfo_.sparseCount);
+        ShiftLeft(scratchLocal.template ReinterpretCast<uint32_t>(),
+                  scratchLocal.template ReinterpretCast<uint32_t>(),
+                  32U - INDEX_BITS - INDEX_HIGH_BITS, constInfo_.sparseCount);
+        PipeBarrier<PIPE_V>();
+        ShiftRight(scratchLocal.template ReinterpretCast<uint32_t>(),
+                   scratchLocal.template ReinterpretCast<uint32_t>(),
+                   32U - INDEX_HIGH_BITS, constInfo_.sparseCount);
+        PipeBarrier<PIPE_V>();
+        Muls(scratchLocal, scratchLocal, -1, constInfo_.sparseCount);
+        PipeBarrier<PIPE_V>();
+        Adds(scratchLocal, scratchLocal, (1 << INDEX_HIGH_BITS) - 1, constInfo_.sparseCount);
+        PipeBarrier<PIPE_V>();
+        ShiftLeft(scratchLocal.template ReinterpretCast<uint32_t>(),
+                  scratchLocal.template ReinterpretCast<uint32_t>(), INDEX_BITS,
+                  constInfo_.sparseCount);
+        PipeBarrier<PIPE_V>();
+        Add(indexLocal, indexLocal, scratchLocal, constInfo_.sparseCount);
+        PipeBarrier<PIPE_V>();
     }
-    DecodePackedIndex(indexLocal.template ReinterpretCast<uint32_t>(),
-                      scratchLocal.template ReinterpretCast<uint32_t>(),
-                      constInfo_.sparseCount, hasLongIndexTag);
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     LIServiceVec::CopyOut(slotOutGm[outputOffset], slotLocal, constInfo_.sparseCount);
 }
@@ -472,6 +564,8 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             if (needCopyOutGm) {
                 if (!constInfo_.returnValue) {
                     LocalTensor<float> valueULocal = outQueue_.AllocTensor<float>();
+                    SortTopkBySlotIndex(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], valueULocal,
+                                        info.actS2Size > EXACT_PACKED_SOURCE_TOKENS);
                     LocalTensor<int32_t> slotLocal = valueULocal.template ReinterpretCast<int32_t>();
                     LocalTensor<int32_t> indexLocal = valueULocal.template ReinterpretCast<int32_t>()[BASE_TOPK];
                     LocalTensor<int32_t> scratchLocal = valueULocal.template ReinterpretCast<int32_t>()[BASE_TOPK * 2];
@@ -732,6 +826,8 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         LocalTensor<float> outValueUb = ldOutValueBuf_.Get<float>();
         LocalTensor<uint32_t> outIdxUb = ldOutIdxBuf_.Get<uint32_t>();
         if (!constInfo_.returnValue) {
+            SortTopkBySlotIndex(curValueIdxUb, tmpUb,
+                                s2ActSeq > EXACT_PACKED_SOURCE_TOKENS);
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();
             DecodeTopkHitMiss(curValueIdxUb, idxULocal1,
                               outValueUb.template ReinterpretCast<int32_t>(),
