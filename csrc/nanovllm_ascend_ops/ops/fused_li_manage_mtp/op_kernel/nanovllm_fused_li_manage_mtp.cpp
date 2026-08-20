@@ -14,13 +14,13 @@ __aicore__ inline void InitMtpPlaceholderOutputs(__gm__ uint8_t *topkSlots,
                                                   __gm__ uint8_t *missCount,
                                                   uint32_t batchSize)
 {
-    if ASCEND_IS_AIV {
+    if ASCEND_IS_AIC {
         constexpr uint32_t MAX_INIT_ELEMENTS = 4096U;
-        uint32_t aivCoreNum = GetBlockNum() * 2U;
-        uint32_t aivCoreIdx = GetBlockIdx();
+        uint32_t aicCoreNum = GetBlockNum();
+        uint32_t aicCoreIdx = GetBlockIdx();
         uint64_t totalSlotElements = static_cast<uint64_t>(batchSize) * 4U * 2048U;
-        uint64_t elementsPerCore = (totalSlotElements + aivCoreNum - 1U) / aivCoreNum;
-        uint64_t coreStart = static_cast<uint64_t>(aivCoreIdx) * elementsPerCore;
+        uint64_t elementsPerCore = (totalSlotElements + aicCoreNum - 1U) / aicCoreNum;
+        uint64_t coreStart = static_cast<uint64_t>(aicCoreIdx) * elementsPerCore;
         uint64_t remainingElements = coreStart < totalSlotElements ? totalSlotElements - coreStart : 0U;
         uint64_t coreElements = elementsPerCore < remainingElements ? elementsPerCore : remainingElements;
         GlobalTensor<int32_t> topkSlotsGm;
