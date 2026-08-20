@@ -128,6 +128,8 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 
 `fused_li_manage_mtp` 当前阶段实现 MTP3 的 4 路 Lightning Indexer 分数计算和每路 Top-2048。
 四路 query 使用同一个请求的 prefill 满块候选范围；暂不执行 hit/miss 合并、淘汰或 cache 映射更新。
+因此当前阶段只写 `topk_src_ids`；`topk_dst_slots`、`miss_src_ids`、`miss_dst_slots` 和
+`miss_counts` 保留在接口中供后续阶段使用，本阶段不写入，也不计入正确性比较。
 
 测试脚本会完成以下检查：
 

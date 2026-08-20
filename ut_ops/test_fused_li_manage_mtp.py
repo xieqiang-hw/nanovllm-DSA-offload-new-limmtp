@@ -124,14 +124,6 @@ def main() -> None:
         raise AssertionError(f"MTP TopK differs from standard LightningIndexer: mismatched_positions={mismatch}")
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError("phase-1 MTP TopK modified cache_slots_pool")
-    invalid_slots = int((case["topk_dst"] != -1).sum().item())
-    invalid_counts = int((case["miss_counts"] != 0).sum().item())
-    if invalid_slots or invalid_counts:
-        raise AssertionError(
-            "phase-1 placeholder outputs are invalid: "
-            f"invalid_topk_slots={invalid_slots}, invalid_miss_counts={invalid_counts}"
-        )
-
     standard_mean, standard_p50 = benchmark(lambda: call_standard(case), args.warmup, args.iters)
     mtp_mean, mtp_p50 = benchmark(lambda: call_mtp(case), args.warmup, args.iters)
     ratio = mtp_mean / standard_mean
