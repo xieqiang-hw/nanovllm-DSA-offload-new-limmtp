@@ -195,15 +195,13 @@ private:
             int32_t src=static_cast<int32_t>(bits.GetValue(i*2U+1U));
             int32_t slot=(src>=0&&static_cast<uint32_t>(src)<actual)?
                          cacheSlotsGm.GetValue(static_cast<uint64_t>(row)*sourceCapacity+src):-1;
-            if(slot<0||static_cast<uint32_t>(slot)>=budget||IsProtectedTopk(b,src)) {
+            // BuildEvictChunk already applies all four strict TopK thresholds.
+            // Consequently a sorted fast-path candidate cannot belong to any
+            // route's TopK.  Source IDs are unique by construction and the
+            // persistent mapping owns each logical slot once, so avoid the
+            // former O(count^2) scalar duplicate/protection validation here.
+            if(slot<0||static_cast<uint32_t>(slot)>=budget) {
                 src=-1; slot=-1;
-            }
-            if(src>=0) {
-                for(uint32_t prev=0;prev<i;++prev) {
-                    if(result.GetValue(prev)==src||result.GetValue(CAPACITY+prev)==slot) {
-                        src=-1; slot=-1; break;
-                    }
-                }
             }
             if(src<0) {
                 for(uint32_t scanned=0;scanned<actual;++scanned) {
@@ -242,17 +240,11 @@ private:
         uint32_t count=BuildUnion(b,input,merged,result,work.ReinterpretCast<int32_t>());
         if(count>0U) {
             for(uint32_t r=0;r<ROUTES;++r) {
-                float threshold=3.402823466e+38F;
-                uint64_t topkBase=(static_cast<uint64_t>(b)*ROUTES+r)*TOPK;
-                uint64_t scoreBase=(static_cast<uint64_t>(b)*ROUTES+r)*sourceCapacity;
-                for(uint32_t i=0;i<TOPK;++i) {
-                    int32_t id=topkSrcGm.GetValue(topkBase+i);
-                    if(id>=0&&static_cast<uint32_t>(id)<sourceCapacity) {
-                        float score=scoresGm.GetValue(scoreBase+static_cast<uint32_t>(id));
-                        threshold=score<threshold?score:threshold;
-                    }
-                }
-                routeThreshold[r]=threshold;
+                // The LI kernel publishes the route TopK threshold before it
+                // reorders TopK by hit/miss and source ID.  Reusing it avoids
+                // 4 * 2048 scalar GM reads per request on the eviction path.
+                routeThreshold[r]=thresholdsGm.GetValue(
+                    static_cast<uint64_t>(b)*ROUTES+r);
             }
         }
         FindEvicts(b,count,merged,input,work,result);

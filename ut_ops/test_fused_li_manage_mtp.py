@@ -219,10 +219,25 @@ def run_graph_check(case: dict[str, torch.Tensor], replays: int) -> None:
         eager_counts = case["miss_counts"].cpu().tolist()
         if captured_counts == eager_counts:
             for request, count in enumerate(captured_counts):
-                for name in ("miss_src", "miss_dst"):
-                    if not torch.equal(captured[name][request, :count],
-                                       case[name][request, :count]):
-                        mismatches.append(f"{name}[{request},:{count}]")
+                if not torch.equal(captured["miss_src"][request, :count],
+                                   case["miss_src"][request, :count]):
+                    mismatches.append(f"miss_src[{request},:{count}]")
+                # Eviction has more than one valid answer.  Graph and eager
+                # need not select identical slots, but both must satisfy the
+                # public constraints: in budget, unique, and not a TopK hit.
+                dst = captured["miss_dst"][request, :count]
+                budget = int(case["cache_tokens"][request].item())
+                if bool(((dst < 0) | (dst >= budget)).any().item()):
+                    mismatches.append(f"miss_dst_range[{request},:{count}]")
+                elif int(torch.unique(dst).numel()) != count:
+                    mismatches.append(f"miss_dst_unique[{request},:{count}]")
+                route_begin = request * MTP_WIDTH
+                route_end = route_begin + MTP_WIDTH
+                protected = torch.unique(
+                    captured["topk_dst"][route_begin:route_end]
+                    [captured["topk_dst"][route_begin:route_end] >= 0])
+                if bool(torch.isin(dst, protected).any().item()):
+                    mismatches.append(f"miss_dst_protected[{request},:{count}]")
         if mismatches:
             raise AssertionError(
                 f"ACLGraph replay outputs differ from eager outputs at replay={replay}: "
