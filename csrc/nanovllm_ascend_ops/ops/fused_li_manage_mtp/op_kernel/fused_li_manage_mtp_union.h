@@ -20,7 +20,6 @@ constexpr uint32_t MISS_KEY_BASE_BITS = 0x40000000U;
 constexpr uint32_t EVICT_CHUNK = 512U;
 constexpr uint32_t EVICT_SORT_REPEATS = EVICT_CHUNK / 32U;
 constexpr uint32_t EVICT_CAPACITY = 2048U;
-constexpr uint32_t EVICT_EXTRA_SCAN_CHUNKS = 4U;
 constexpr uint32_t THRESHOLD_STRIDE = 8U;
 constexpr int32_t NEG_INF_BITS = static_cast<int32_t>(0xFF800000U);
 
@@ -288,16 +287,10 @@ private:
             if (!valid) {
                 continue;
             }
-            for (uint32_t selected = 0U; selected < accepted; ++selected) {
-                uint32_t selectedPayload = bits.GetValue(selected * 2U + 1U);
-                if (static_cast<int32_t>(selectedPayload >> INDEX_BITS) == slot) {
-                    valid = false;
-                    break;
-                }
-            }
-            if (!valid) {
-                continue;
-            }
+            // Source chunks are disjoint, and a valid cache row is a slot
+            // permutation, so pre-merge candidates are unique by construction.
+            // Keep the final output duplicate guard as the safety net instead
+            // of adding an O(candidateCap^2) check to every scanned chunk.
             if (accepted != cursor) {
                 candidates.SetValue(accepted * 2U, candidateKey);
                 bits.SetValue(accepted * 2U + 1U, payload);
@@ -333,7 +326,6 @@ private:
             return false;
         }
         uint32_t startChunk = HashEvictScanSeed(actual, cacheRow) % chunks;
-        uint32_t stopScan = chunks;
         bool hasLongIndexTag = actual > INDEX_MASK + 1U;
 
         if (candidateCap == EVICT_CHUNK) {
@@ -397,26 +389,19 @@ private:
                 BuildEvictCandidateChunk(batch, cacheRow, start, valid,
                                          hasLongIndexTag,
                                          chunkPair, scratch);
+                Sync<HardEvent::V_S>(HardEvent::V_S);
+                CompactValidCandidates(batch, EVICT_CHUNK, chunkPair);
                 MergeEvictCandidateChunk(accumulator, chunkPair,
                                          candidateCap, mergeTmp);
                 Sync<HardEvent::V_S>(HardEvent::V_S);
-                if (stopScan == chunks &&
-                    accumulator.GetValue((count - 1U) * 2U) > 0.0F) {
-                    uint32_t remaining = chunks - scan - 1U;
-                    uint32_t extra = remaining < EVICT_EXTRA_SCAN_CHUNKS
-                                         ? remaining
-                                         : EVICT_EXTRA_SCAN_CHUNKS;
-                    if (extra == 0U) {
-                        break;
-                    }
-                    stopScan = scan + 1U + extra;
-                } else if (stopScan != chunks && scan + 1U >= stopScan) {
-                    break;
+                uint32_t accepted = CompactValidCandidates(batch, candidateCap,
+                                                           accumulator);
+                if (accepted >= count) {
+                    return true;
                 }
             }
+            return false;
         }
-        Sync<HardEvent::V_S>(HardEvent::V_S);
-        return accumulator.GetValue((count - 1U) * 2U) > 0.0F;
     }
 
     // Consume the sorted prefix with the same scalar validation pattern as
