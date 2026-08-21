@@ -299,11 +299,31 @@ def check_evict_slots(case: dict[str, torch.Tensor], old_cache: torch.Tensor,
         route_rows = expected_src[route_begin:route_end].cpu()
         for position in bad_positions[:8].tolist():
             token = int(evicted_tokens[position])
-            routes = [route for route in range(MTP_WIDTH)
-                      if bool((route_rows[route] == token).any())]
+            route_ranks = []
+            for route in range(MTP_WIDTH):
+                matches = torch.nonzero(route_rows[route] == token).flatten()
+                if matches.numel():
+                    route_ranks.append(f"{route}:{int(matches[0])}")
+            slot = int(actual[position])
+            payload = (slot << 18) | (token & ((1 << 18) - 1))
+            key_tag = (token >> 18) & 0x7
             details.append(
-                f"pos={position},slot={int(actual[position])},"
-                f"token={token},routes={routes}")
+                f"pos={position},slot={slot},token={token},"
+                f"route_ranks=[{','.join(route_ranks)}],"
+                f"payload=0x{payload:08x},key_tag={key_tag}")
+        preview_count = min(expected_count, 16)
+        preview_slots = actual[:preview_count].tolist()
+        preview_tokens = evicted_tokens[:preview_count].tolist()
+        print(
+            "FUSED_LI_MANAGE_MTP_EVICT_FAILURE "
+            f"case={label} request={request} pool_row={pool_row} "
+            f"candidate_len={int(case['candidate_lens'][request].item())} "
+            f"cache_budget={budget} union_miss_count={expected_count} "
+            f"eligible_count={int(eligible.numel())} protected_count={int(protected.numel())} "
+            f"evict_slots_first16={preview_slots} evict_tokens_first16={preview_tokens} "
+            f"bad={' ; '.join(details)}",
+            flush=True,
+        )
         raise AssertionError(
             f"{label}: selected eviction tokens from route TopK: "
             + "; ".join(details))
@@ -402,8 +422,14 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     )
     summaries = []
     for index, (label, overrides, cache_mode) in enumerate(cases):
-        print(f"FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN case={label}", flush=True)
         edge_args = boundary_args(args, seed=args.seed + 100 + index, **overrides)
+        print(
+            "FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN "
+            f"case={label} seed={edge_args.seed} dtype={edge_args.dtype} "
+            f"candidate_len={edge_args.seq_len} cache_tokens={edge_args.cache_tokens} "
+            f"requested_route_misses={edge_args.perf_query_miss_count}",
+            flush=True,
+        )
         case = make_case(edge_args)
         if label == "identical_routes" or label.startswith("identical_"):
             case["query"].copy_(case["query"][0:1].expand_as(case["query"]))
@@ -465,7 +491,8 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     validate_evict_payload_codec()
-    require_local_opapi()
+    opapi_path = require_local_opapi()
+    print(f"FUSED_LI_MANAGE_MTP_RUNTIME opapi={opapi_path}", flush=True)
     if not callable(getattr(torch_npu, "npu_lightning_indexer", None)):
         raise RuntimeError("torch_npu.npu_lightning_indexer is unavailable")
     if not args.skip_boundary_tests:
