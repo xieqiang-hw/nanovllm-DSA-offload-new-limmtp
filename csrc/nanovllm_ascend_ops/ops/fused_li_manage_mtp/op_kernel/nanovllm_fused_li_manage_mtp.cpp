@@ -34,7 +34,7 @@ using namespace LIKernel;
             if ((GetBlockIdx() & 1U) == 0U) {                                                                         \
                 tPipe.Reset();                                                                                         \
                 MtpUnion::MtpMissUnion unionOp;                                                                        \
-                unionOp.Init(missSrcIds, missDstSlots, actualSeqLengths, cacheSlots, reqPoolEntries,                 \
+                unionOp.Init(missSrcIds, missDstSlots, actualSeqLengths, cacheSlots, cacheTokens, reqPoolEntries,    \
                              scoreScratch, thresholdScratch, missSrcIds, missCount,                                  \
                              tiling_data->bSize, tiling_data->s2Size, tiling_data->s2Size, &tPipe);                  \
                 unionOp.Process(GetBlockIdx() / 2U, GetBlockNum());                                                    \
@@ -57,7 +57,6 @@ __global__ __aicore__ void nanovllm_fused_li_manage_mtp(
 #else
     TPipe tPipe;
     (void)cacheSlotsOut;
-    (void)cacheTokens;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     if constexpr (DT == LI_MTP_TPL_FP16) {

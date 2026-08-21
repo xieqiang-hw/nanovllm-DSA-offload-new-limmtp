@@ -36,7 +36,7 @@ class MtpMissUnion {
 public:
     __aicore__ inline void Init(GM_ADDR pair0, GM_ADDR pair1,
                                 GM_ADDR candidates, GM_ADDR cacheSlots,
-                                GM_ADDR reqEntries, GM_ADDR scoreScratch,
+                                GM_ADDR cacheTokens, GM_ADDR reqEntries, GM_ADDR scoreScratch,
                                 GM_ADDR thresholdScratch, GM_ADDR out,
                                 GM_ADDR counts, uint32_t batch,
                                 uint32_t scoreCapacity,
@@ -47,6 +47,7 @@ public:
         evictSlotsGm.SetGlobalBuffer((__gm__ int32_t *)pair1);
         candidatesGm.SetGlobalBuffer((__gm__ int32_t *)candidates);
         cacheSlotsGm.SetGlobalBuffer((__gm__ int32_t *)cacheSlots);
+        cacheTokensGm.SetGlobalBuffer((__gm__ int32_t *)cacheTokens);
         reqEntriesGm.SetGlobalBuffer((__gm__ int32_t *)reqEntries);
         scoreScratchGm.SetGlobalBuffer((__gm__ float *)scoreScratch);
         thresholdScratchGm.SetGlobalBuffer((__gm__ float *)thresholdScratch);
@@ -369,6 +370,7 @@ private:
         }
         if (found) {
             uint32_t actual = static_cast<uint32_t>(candidatesGm.GetValue(batch));
+            uint32_t cacheTokenCount = static_cast<uint32_t>(cacheTokensGm.GetValue(batch));
             uint32_t candidateCap =
                 ((count + EVICT_CHUNK - 1U) / EVICT_CHUNK) * EVICT_CHUNK;
             bool hasLongIndexTag = actual > INDEX_MASK + 1U;
@@ -388,7 +390,8 @@ private:
                     sourceIndex |= (keyBits & ((1U << INDEX_HIGH_BITS) - 1U)) << INDEX_BITS;
                 }
                 int32_t slot = static_cast<int32_t>(payload >> INDEX_BITS);
-                if (sourceIndex >= actual || slot < 0) {
+                if (sourceIndex >= actual || slot < 0 ||
+                    static_cast<uint32_t>(slot) >= cacheTokenCount) {
                     continue;
                 }
                 bool belowAllThresholds = true;
@@ -401,7 +404,14 @@ private:
                         break;
                     }
                 }
-                if (belowAllThresholds) {
+                bool duplicateSlot = false;
+                for (uint32_t selected = 0U; selected < accepted; ++selected) {
+                    if (output.GetValue(selected) == slot) {
+                        duplicateSlot = true;
+                        break;
+                    }
+                }
+                if (belowAllThresholds && !duplicateSlot) {
                     output.SetValue(accepted++, slot);
                 }
             }
@@ -508,6 +518,7 @@ private:
     GlobalTensor<int32_t> evictSlotsGm;
     GlobalTensor<int32_t> candidatesGm;
     GlobalTensor<int32_t> cacheSlotsGm;
+    GlobalTensor<int32_t> cacheTokensGm;
     GlobalTensor<int32_t> reqEntriesGm;
     GlobalTensor<float> scoreScratchGm;
     GlobalTensor<float> thresholdScratchGm;
