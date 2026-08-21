@@ -42,8 +42,10 @@ def parse_args() -> argparse.Namespace:
 def make_case(args: argparse.Namespace) -> dict[str, torch.Tensor]:
     if args.seq_len < TOPK or args.seq_len % BLOCK_SIZE:
         raise ValueError("--seq-len must be a multiple of 128 and >= 2048")
-    if args.cache_tokens < TOPK or args.cache_tokens > args.seq_len:
-        raise ValueError("--cache-tokens must be in [2048, seq_len]")
+    minimum_cache_tokens = min(args.seq_len, UNION_CAPACITY)
+    if args.cache_tokens < minimum_cache_tokens or args.cache_tokens > args.seq_len:
+        raise ValueError(
+            f"--cache-tokens must be in [{minimum_cache_tokens}, seq_len]")
     if not 0 <= args.perf_query_miss_count <= TOPK:
         raise ValueError("--perf-query-miss-count must be in [0, 2048]")
     if args.perf_query_noise <= 0 or args.graph_replays < 0:
@@ -208,6 +210,32 @@ def build_balanced_cache(case: dict[str, torch.Tensor], reference: torch.Tensor,
         case["cache_slots"][pool_row, cached.to(case["query"].device)] = slots.to(
             case["query"].device)
     return union_sizes, union_miss_counts
+
+
+def build_union_miss_cache(case: dict[str, torch.Tensor],
+                           reference: torch.Tensor) -> list[int]:
+    """Build a valid slot permutation containing no token from the TopK union."""
+    reference_cpu = reference.cpu().to(torch.int64)
+    source_len = case["args"].seq_len
+    budget = case["args"].cache_tokens
+    slot_generator = torch.Generator().manual_seed(case["args"].seed + 1901)
+    union_sizes = []
+    for request in range(case["batch"]):
+        pool_row = int(case["req_entries_cpu"][request])
+        rows = reference_cpu[request * MTP_WIDTH:(request + 1) * MTP_WIDTH]
+        union = torch.unique(rows.flatten(), sorted=True)
+        union_sizes.append(int(union.numel()))
+        union_mask = torch.zeros(source_len, dtype=torch.bool)
+        union_mask[union] = True
+        cached = torch.arange(source_len, dtype=torch.int64)[~union_mask][:budget]
+        if cached.numel() != budget:
+            raise AssertionError(
+                f"request={request}: only {cached.numel()} non-union tokens for cache budget={budget}"
+            )
+        slots = torch.randperm(budget, generator=slot_generator).to(torch.int32)
+        case["cache_slots"][pool_row, cached.to(case["query"].device)] = slots.to(
+            case["query"].device)
+    return union_sizes
 
 
 def run_graph_check(case: dict[str, torch.Tensor], replays: int) -> None:
@@ -415,22 +443,22 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     cases = (
         ("minimum_len_all_hit_bf16", dict(seq_len=TOPK, cache_tokens=TOPK,
                                            dtype="bf16"), "all_hit"),
-        ("fp16_one_miss", dict(seq_len=8192, cache_tokens=8064, dtype="fp16",
+        ("fp16_one_miss", dict(seq_len=16384, cache_tokens=8192, dtype="fp16",
                                perf_query_miss_count=1), "balanced"),
-        ("partial_budget", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+        ("partial_budget", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
                                  perf_query_miss_count=64), "balanced"),
-        ("identical_512_miss", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+        ("identical_512_miss", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
                                     perf_query_miss_count=512), "balanced"),
-        ("identical_513_miss", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+        ("identical_513_miss", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
                                     perf_query_miss_count=513), "balanced"),
-        ("identical_2048_miss", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+        ("identical_2048_miss", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
                                      perf_query_miss_count=2048), "balanced"),
-        ("all_miss", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
-                          perf_query_noise=2.0), "all_miss"),
-        ("identical_routes", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
-                                  perf_query_noise=1e-6), "all_miss"),
-        ("union_capacity", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
-                                perf_query_noise=4.0), "all_miss"),
+        ("all_miss", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
+                          perf_query_noise=2.0), "union_miss"),
+        ("identical_routes", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
+                                  perf_query_noise=1e-6), "union_miss"),
+        ("union_capacity", dict(seq_len=16384, cache_tokens=8192, dtype="bf16",
+                                perf_query_noise=4.0), "union_miss"),
     )
     summaries = []
     for index, (label, overrides, cache_mode) in enumerate(cases):
@@ -468,10 +496,11 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
         elif cache_mode == "all_hit":
             case["cache_slots"][0, :edge_args.seq_len] = torch.arange(
                 edge_args.seq_len, dtype=torch.int32, device=case["query"].device)
-        # all_miss deliberately retains the initial -1 persistent map.
+        elif cache_mode == "union_miss":
+            build_union_miss_cache(case, reference)
         counts = check_case(
             case, reference, label,
-            require_slot_zero=(cache_mode != "all_miss" and
+            require_slot_zero=(cache_mode != "union_miss" and
                                edge_args.perf_query_miss_count < TOPK))
         if label == "identical_routes" and counts != [TOPK]:
             raise AssertionError(f"{label}: expected union={TOPK}, actual={counts}")
@@ -483,8 +512,8 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
     # Request-pool indirection: move the logical row away from row 0.
     print("FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN case=noncontiguous_request_pool",
           flush=True)
-    edge_args = boundary_args(args, seed=args.seed + 200, seq_len=8192,
-                              cache_tokens=8064, dtype="bf16",
+    edge_args = boundary_args(args, seed=args.seed + 200, seq_len=16384,
+                              cache_tokens=8192, dtype="bf16",
                               perf_query_miss_count=1)
     case = make_case(edge_args)
     reference = call_standard(case).reshape(MTP_WIDTH, TOPK)
