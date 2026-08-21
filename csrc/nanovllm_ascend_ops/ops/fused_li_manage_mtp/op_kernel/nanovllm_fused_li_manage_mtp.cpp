@@ -34,8 +34,9 @@ using namespace LIKernel;
             if ((GetBlockIdx() & 1U) == 0U) {                                                                         \
                 tPipe.Reset();                                                                                         \
                 MtpUnion::MtpMissUnion unionOp;                                                                        \
-                unionOp.Init(missSrcIds, missDstSlots, actualSeqLengths,                                             \
-                             missSrcIds, missCount, tiling_data->bSize, &tPipe);                                      \
+                unionOp.Init(missSrcIds, missDstSlots, actualSeqLengths, cacheSlots, reqPoolEntries,                 \
+                             scoreScratch, thresholdScratch, missSrcIds, missCount,                                  \
+                             tiling_data->bSize, tiling_data->s2Size, tiling_data->s2Size, &tPipe);                  \
                 unionOp.Process(GetBlockIdx() / 2U, GetBlockNum());                                                    \
             }                                                                                                          \
         }                                                                                                              \
