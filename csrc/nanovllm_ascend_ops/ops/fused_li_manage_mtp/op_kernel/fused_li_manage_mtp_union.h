@@ -24,20 +24,18 @@ __aicore__ inline void Sync(HardEvent e)
 
 class MtpMissUnion {
 public:
-    __aicore__ inline void Init(GM_ADDR pair0, GM_ADDR pair1, GM_ADDR slots,
+    __aicore__ inline void Init(GM_ADDR pair0, GM_ADDR pair1,
                                 GM_ADDR candidates, GM_ADDR out, GM_ADDR counts,
                                 uint32_t batch, TPipe *pipe)
     {
         pair0Gm.SetGlobalBuffer((__gm__ float *)pair0);
         pair1Gm.SetGlobalBuffer((__gm__ float *)pair1);
-        slotsGm.SetGlobalBuffer((__gm__ int32_t *)slots);
         candidatesGm.SetGlobalBuffer((__gm__ int32_t *)candidates);
         outGm.SetGlobalBuffer((__gm__ int32_t *)out);
         countsGm.SetGlobalBuffer((__gm__ int32_t *)counts);
         batchSize = batch;
         pipe->InitBuffer(pairInBuf, CAPACITY * 2U * sizeof(float));
         pipe->InitBuffer(pairOutBuf, CAPACITY * 2U * sizeof(float));
-        pipe->InitBuffer(slotsBuf, TOPK * sizeof(int32_t));
         pipe->InitBuffer(countBuf, 32U);
     }
 
@@ -54,16 +52,31 @@ private:
         LocalTensor<float> input = pairInBuf.Get<float>();
         LocalTensor<float> merged = pairOutBuf.Get<float>();
         LocalTensor<int32_t> result = input.ReinterpretCast<int32_t>();
-        LocalTensor<int32_t> slots = slotsBuf.Get<int32_t>();
         LocalTensor<int32_t> countLocal = countBuf.Get<int32_t>();
+        uint64_t pairBase = static_cast<uint64_t>(batch) * CAPACITY;
+        DataCopy(input, pair0Gm[pairBase], CAPACITY);
+        DataCopy(input[CAPACITY], pair1Gm[pairBase], CAPACITY);
+        Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+
         uint32_t lengths[ROUTES] = {0U, 0U, 0U, 0U};
+        LocalTensor<uint32_t> pairBits = input.ReinterpretCast<uint32_t>();
         for (uint32_t route = 0; route < ROUTES; ++route) {
-            uint64_t base = (static_cast<uint64_t>(batch) * ROUTES + route) * TOPK;
-            DataCopy(slots, slotsGm[base], TOPK);
-            Sync<HardEvent::MTE2_S>(HardEvent::MTE2_S);
-            while (lengths[route] < TOPK && slots.GetValue(lengths[route]) < 0) {
-                ++lengths[route];
+            // SortTopkBySlotIndex places miss pairs first.  Miss keys are in
+            // [MISS_KEY_BASE_BITS, +inf), while hit keys are below that range,
+            // so the route miss prefix can be located with a binary search.
+            uint32_t routeOffset = route * PAIR_WORDS;
+            uint32_t low = 0U;
+            uint32_t high = TOPK;
+            while (low < high) {
+                uint32_t middle = (low + high) >> 1U;
+                uint32_t key = pairBits.GetValue(routeOffset + middle * 2U);
+                if (key >= MISS_KEY_BASE_BITS) {
+                    low = middle + 1U;
+                } else {
+                    high = middle;
+                }
             }
+            lengths[route] = low;
         }
 
         uint32_t total = lengths[0] + lengths[1] + lengths[2] + lengths[3];
@@ -75,10 +88,7 @@ private:
             return;
         }
 
-        uint64_t pairBase = static_cast<uint64_t>(batch) * CAPACITY;
-        DataCopy(input, pair0Gm[pairBase], CAPACITY);
-        DataCopy(input[CAPACITY], pair1Gm[pairBase], CAPACITY);
-        Sync<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        Sync<HardEvent::S_V>(HardEvent::S_V);
 
         MrgSort4Info params;
         params.elementLengths[0] = lengths[0];
@@ -128,13 +138,11 @@ private:
 
     GlobalTensor<float> pair0Gm;
     GlobalTensor<float> pair1Gm;
-    GlobalTensor<int32_t> slotsGm;
     GlobalTensor<int32_t> candidatesGm;
     GlobalTensor<int32_t> outGm;
     GlobalTensor<int32_t> countsGm;
     TBuf<TPosition::VECCALC> pairInBuf;
     TBuf<TPosition::VECCALC> pairOutBuf;
-    TBuf<TPosition::VECCALC> slotsBuf;
     TBuf<TPosition::VECCALC> countBuf;
     uint32_t batchSize = 0U;
 };

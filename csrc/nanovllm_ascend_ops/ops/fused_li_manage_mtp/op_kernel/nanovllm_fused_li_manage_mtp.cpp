@@ -29,7 +29,7 @@ using namespace LIKernel;
             if ((GetBlockIdx() & 1U) == 0U) {                                                                         \
                 tPipe.Reset();                                                                                         \
                 MtpUnion::MtpMissUnion unionOp;                                                                        \
-                unionOp.Init(missSrcIds, missDstSlots, topkSlots, actualSeqLengths,                                  \
+                unionOp.Init(missSrcIds, missDstSlots, actualSeqLengths,                                             \
                              missSrcIds, missCount, tiling_data->bSize, &tPipe);                                      \
                 unionOp.Process(GetBlockIdx() / 2U, GetBlockNum());                                                    \
             }                                                                                                          \
