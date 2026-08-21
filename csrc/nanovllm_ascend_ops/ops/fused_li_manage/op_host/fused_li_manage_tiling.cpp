@@ -314,12 +314,17 @@ ge::graphStatus FusedLiManageTiling::DoTiling(FusedLiManageTilingInfo *tilingInf
                          VALUE_AND_INDEX * DECODE_SPARSE_COUNT * sizeof(float);
         workspaceSize += static_cast<uint64_t>(blockDim) * LD_HEAD_TAIL * S1_BASE_SIZE *
                          LD_PARAM_NUM * sizeof(int64_t);
-        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * scoreStride * sizeof(float);
+        // MTP persists one complete score row for each of the four speculative
+        // routes.  MtpWorkspace::ThresholdOffset and MtpMissUnion both address
+        // this region as [B, 4, scoreStride].
+        constexpr uint32_t MTP_ROUTES = 4;
+        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * MTP_ROUTES *
+                         scoreStride * sizeof(float);
         // Each packed MTP query row owns one 32-byte threshold record.  The
         // kernel indexes thresholdScratch with THRESHOLD_STRIDE=8 floats so
         // scalar GM writes from the four routes never share a data block.
         constexpr uint32_t MTP_THRESHOLD_STRIDE = 8;
-        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) *
+        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * MTP_ROUTES *
                          MTP_THRESHOLD_STRIDE * sizeof(float);
     }
     constexpr uint32_t PARTIAL_SLOTS_PER_CORE = 2;
