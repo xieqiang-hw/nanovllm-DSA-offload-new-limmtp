@@ -355,6 +355,14 @@ private:
                                              hasLongIndexTag,
                                              chunkBlocks[item * EVICT_CHUNK * 2U],
                                              scratch);
+                    // Reject vector false positives before they compete for
+                    // the fixed 512-entry accumulator.  Compacting only after
+                    // the merge can let an invalid high-key item displace a
+                    // previously accepted candidate, especially in the final
+                    // scan batch where there is no later refill opportunity.
+                    Sync<HardEvent::V_S>(HardEvent::V_S);
+                    CompactValidCandidates(batch, EVICT_CHUNK,
+                                           chunkBlocks[item * EVICT_CHUNK * 2U]);
                 }
                 if (batchChunks == 1U) {
                     LIServiceVec::MergeSort(accumulator, EVICT_CHUNK, chunkBlocks,
