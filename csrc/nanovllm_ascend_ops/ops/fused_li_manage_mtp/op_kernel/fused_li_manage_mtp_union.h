@@ -352,8 +352,10 @@ private:
         return accumulator.GetValue((count - 1U) * 2U) > 0.0F;
     }
 
-    // Decode HBM slots directly from the same slot14/index_low18 payload used
-    // by the non-MTP packed fast path. cache_slots remains read-only here.
+    // Consume the sorted prefix with the same scalar validation pattern as
+    // non-MTP UpdateCacheAndWriteTopkSlots.  MTP additionally rechecks the
+    // four-route threshold intersection before accepting a packed candidate;
+    // the vector filter is an optimization, not the final correctness guard.
     __aicore__ inline void WriteEvictSlots(uint32_t batch, uint32_t count,
                                            bool found,
                                            LocalTensor<float> candidates,
@@ -362,21 +364,52 @@ private:
         if (count == 0U) {
             return;
         }
-        Duplicate(output, -1, count);
-        PipeBarrier<PIPE_V>();
-        if (found) {
-            LIServiceVec::ExtractIndex(output.ReinterpretCast<uint32_t>(),
-                                       candidates.ReinterpretCast<uint32_t>(), count);
-            ShiftRight(output.ReinterpretCast<uint32_t>(), output.ReinterpretCast<uint32_t>(),
-                       INDEX_BITS, count);
-            PipeBarrier<PIPE_V>();
+        for (uint32_t index = 0U; index < count; ++index) {
+            output.SetValue(index, -1);
         }
-        // output is produced by vector instructions.  Match the non-MTP
-        // CopyOut dependency: MTE3 must wait for V, not for the scalar pipe.
-        Sync<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+        if (found) {
+            uint32_t actual = static_cast<uint32_t>(candidatesGm.GetValue(batch));
+            uint32_t candidateCap =
+                ((count + EVICT_CHUNK - 1U) / EVICT_CHUNK) * EVICT_CHUNK;
+            bool hasLongIndexTag = actual > INDEX_MASK + 1U;
+            LocalTensor<uint32_t> candidateBits = candidates.ReinterpretCast<uint32_t>();
+            uint32_t cursor = 0U;
+            uint32_t accepted = 0U;
+            while (cursor < candidateCap && accepted < count) {
+                float candidateKey = candidates.GetValue(cursor * 2U);
+                if (candidateKey <= 0.0F) {
+                    break;
+                }
+                uint32_t keyBits = candidateBits.GetValue(cursor * 2U);
+                uint32_t payload = candidateBits.GetValue(cursor * 2U + 1U);
+                ++cursor;
+                uint32_t sourceIndex = payload & INDEX_MASK;
+                if (hasLongIndexTag) {
+                    sourceIndex |= (keyBits & ((1U << INDEX_HIGH_BITS) - 1U)) << INDEX_BITS;
+                }
+                int32_t slot = static_cast<int32_t>(payload >> INDEX_BITS);
+                if (sourceIndex >= actual || slot < 0) {
+                    continue;
+                }
+                bool belowAllThresholds = true;
+                for (uint32_t route = 0U; route < ROUTES; ++route) {
+                    uint64_t routeIndex = static_cast<uint64_t>(batch) * ROUTES + route;
+                    float score = scoreScratchGm.GetValue(routeIndex * scoreStride + sourceIndex);
+                    float threshold = thresholdScratchGm.GetValue(routeIndex * THRESHOLD_STRIDE);
+                    if (score >= threshold) {
+                        belowAllThresholds = false;
+                        break;
+                    }
+                }
+                if (belowAllThresholds) {
+                    output.SetValue(accepted++, slot);
+                }
+            }
+        }
+        Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
         DataCopyPad(evictSlotsGm[static_cast<uint64_t>(batch) * CAPACITY], output,
                     {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
-        Sync<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+        Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
     }
 
     __aicore__ inline void ProcessBatch(uint32_t batch)
