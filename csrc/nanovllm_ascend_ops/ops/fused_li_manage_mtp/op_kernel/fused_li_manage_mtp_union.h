@@ -244,6 +244,74 @@ private:
                                 chunkPair, EVICT_CHUNK, tmp);
     }
 
+    // Validate and compact a sorted candidate prefix in place.  Keeping only
+    // candidates accepted by the final scalar rules lets the <=512 fast path
+    // continue scanning after vector false positives instead of returning a
+    // short destination-slot prefix.
+    __aicore__ inline uint32_t CompactValidCandidates(
+        uint32_t batch, uint32_t candidateCap, LocalTensor<float> candidates)
+    {
+        uint32_t actual = static_cast<uint32_t>(candidatesGm.GetValue(batch));
+        uint32_t cacheTokenCount = static_cast<uint32_t>(cacheTokensGm.GetValue(batch));
+        uint32_t cacheRow = static_cast<uint32_t>(reqEntriesGm.GetValue(batch));
+        uint64_t cacheRowBase = static_cast<uint64_t>(cacheRow) * sourceCapacity;
+        bool hasLongIndexTag = actual > INDEX_MASK + 1U;
+        LocalTensor<uint32_t> bits = candidates.ReinterpretCast<uint32_t>();
+        uint32_t accepted = 0U;
+        for (uint32_t cursor = 0U; cursor < candidateCap; ++cursor) {
+            float candidateKey = candidates.GetValue(cursor * 2U);
+            if (candidateKey <= 0.0F) {
+                break;
+            }
+            uint32_t keyBits = bits.GetValue(cursor * 2U);
+            uint32_t payload = bits.GetValue(cursor * 2U + 1U);
+            uint32_t sourceIndex = payload & INDEX_MASK;
+            if (hasLongIndexTag) {
+                sourceIndex |= (keyBits & ((1U << INDEX_HIGH_BITS) - 1U)) << INDEX_BITS;
+            }
+            int32_t slot = static_cast<int32_t>(payload >> INDEX_BITS);
+            if (sourceIndex >= actual || slot < 0 ||
+                static_cast<uint32_t>(slot) >= cacheTokenCount ||
+                cacheSlotsGm.GetValue(cacheRowBase + sourceIndex) != slot) {
+                continue;
+            }
+            bool valid = true;
+            for (uint32_t route = 0U; route < ROUTES; ++route) {
+                uint64_t routeIndex = static_cast<uint64_t>(batch) * ROUTES + route;
+                float score = scoreScratchGm.GetValue(routeIndex * scoreStride + sourceIndex);
+                float threshold = thresholdScratchGm.GetValue(routeIndex * THRESHOLD_STRIDE);
+                if (score >= threshold) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) {
+                continue;
+            }
+            for (uint32_t selected = 0U; selected < accepted; ++selected) {
+                uint32_t selectedPayload = bits.GetValue(selected * 2U + 1U);
+                if (static_cast<int32_t>(selectedPayload >> INDEX_BITS) == slot) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) {
+                continue;
+            }
+            if (accepted != cursor) {
+                candidates.SetValue(accepted * 2U, candidateKey);
+                bits.SetValue(accepted * 2U + 1U, payload);
+            }
+            ++accepted;
+        }
+        for (uint32_t cursor = accepted; cursor < candidateCap; ++cursor) {
+            bits.SetValue(cursor * 2U, static_cast<uint32_t>(NEG_INF_BITS));
+            bits.SetValue(cursor * 2U + 1U, 0U);
+        }
+        Sync<HardEvent::S_V>(HardEvent::S_V);
+        return accepted;
+    }
+
     __aicore__ inline bool FindEvictCandidates(uint32_t batch, uint32_t count,
                                                 LocalTensor<float> input,
                                                 LocalTensor<float> merged)
@@ -277,9 +345,6 @@ private:
             uint32_t scan = 0U;
             while (scan < chunks) {
                 uint32_t batchChunks = chunks - scan < 4U ? chunks - scan : 4U;
-                if (stopScan != chunks && batchChunks > stopScan - scan) {
-                    batchChunks = stopScan - scan;
-                }
                 for (uint32_t item = 0U; item < batchChunks; ++item) {
                     uint32_t chunk = (startChunk + scan + item) % chunks;
                     uint32_t start = chunk * EVICT_CHUNK;
@@ -304,20 +369,13 @@ private:
                 }
                 scan += batchChunks;
                 Sync<HardEvent::V_S>(HardEvent::V_S);
-                if (stopScan == chunks &&
-                    accumulator.GetValue((count - 1U) * 2U) > 0.0F) {
-                    uint32_t remaining = chunks - scan;
-                    uint32_t extra = remaining < EVICT_EXTRA_SCAN_CHUNKS
-                                         ? remaining
-                                         : EVICT_EXTRA_SCAN_CHUNKS;
-                    if (extra == 0U) {
-                        break;
-                    }
-                    stopScan = scan + extra;
-                } else if (stopScan != chunks && scan >= stopScan) {
-                    break;
+                uint32_t accepted = CompactValidCandidates(batch, candidateCap,
+                                                           accumulator);
+                if (accepted >= count) {
+                    return true;
                 }
             }
+            return false;
         } else {
             LocalTensor<float> scratch = input;
             LocalTensor<float> mergeTmp = input[EVICT_CHUNK * 12U];
