@@ -147,28 +147,40 @@ def build_balanced_cache(case: dict[str, torch.Tensor], reference: torch.Tensor,
             mask: torch.nonzero(membership == mask).flatten().to(torch.int64)
             for mask in range(1, 1 << MTP_WIDTH)
         }
-        common_count = min(per_query_misses // 2, int(by_mask[0b1111].numel()))
-        selected = [by_mask[0b1111][:common_count]]
-        pair_degree = per_query_misses - common_count
-        opposite_pairs = ((0b0011, 0b1100), (0b0101, 0b1010), (0b1001, 0b0110))
-        capacities = [min(int(by_mask[a].numel()), int(by_mask[b].numel()))
-                      for a, b in opposite_pairs]
-        if sum(capacities) < pair_degree:
-            raise AssertionError(
-                f"request={request}: insufficient shared-miss capacity={capacities}; "
-                "increase --perf-query-noise"
-            )
-        pair_counts = [min(pair_degree // 3, capacity) for capacity in capacities]
-        left = pair_degree - sum(pair_counts)
-        while left:
-            for idx, capacity in enumerate(capacities):
-                if pair_counts[idx] < capacity:
-                    pair_counts[idx] += 1
-                    left -= 1
-                    if left == 0:
-                        break
-        for (a, b), count in zip(opposite_pairs, pair_counts):
-            selected.extend((by_mask[a][:count], by_mask[b][:count]))
+        identical_routes = all(torch.equal(rows[0], rows[route])
+                               for route in range(1, MTP_WIDTH))
+        if identical_routes:
+            if int(by_mask[0b1111].numel()) < per_query_misses:
+                raise AssertionError(
+                    f"request={request}: common TopK capacity="
+                    f"{int(by_mask[0b1111].numel())}, required={per_query_misses}"
+                )
+            # Every selected common token contributes one miss to every route,
+            # so the miss union also has exactly per_query_misses entries.
+            selected = [by_mask[0b1111][:per_query_misses]]
+        else:
+            common_count = min(per_query_misses // 2, int(by_mask[0b1111].numel()))
+            selected = [by_mask[0b1111][:common_count]]
+            pair_degree = per_query_misses - common_count
+            opposite_pairs = ((0b0011, 0b1100), (0b0101, 0b1010), (0b1001, 0b0110))
+            capacities = [min(int(by_mask[a].numel()), int(by_mask[b].numel()))
+                          for a, b in opposite_pairs]
+            if sum(capacities) < pair_degree:
+                raise AssertionError(
+                    f"request={request}: insufficient shared-miss capacity={capacities}; "
+                    "increase --perf-query-noise"
+                )
+            pair_counts = [min(pair_degree // 3, capacity) for capacity in capacities]
+            left = pair_degree - sum(pair_counts)
+            while left:
+                for idx, capacity in enumerate(capacities):
+                    if pair_counts[idx] < capacity:
+                        pair_counts[idx] += 1
+                        left -= 1
+                        if left == 0:
+                            break
+            for (a, b), count in zip(opposite_pairs, pair_counts):
+                selected.extend((by_mask[a][:count], by_mask[b][:count]))
         misses = torch.cat(selected) if selected else torch.empty(0, dtype=torch.int64)
         route_counts = [int(torch.isin(row, misses).sum()) for row in rows]
         if route_counts != [per_query_misses] * MTP_WIDTH:
