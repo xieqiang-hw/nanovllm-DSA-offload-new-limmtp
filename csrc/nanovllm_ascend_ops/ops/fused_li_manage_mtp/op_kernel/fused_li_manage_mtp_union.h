@@ -363,6 +363,7 @@ private:
             return;
         }
         Duplicate(output, -1, count);
+        PipeBarrier<PIPE_V>();
         if (found) {
             LIServiceVec::ExtractIndex(output.ReinterpretCast<uint32_t>(),
                                        candidates.ReinterpretCast<uint32_t>(), count);
@@ -370,10 +371,12 @@ private:
                        INDEX_BITS, count);
             PipeBarrier<PIPE_V>();
         }
-        Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+        // output is produced by vector instructions.  Match the non-MTP
+        // CopyOut dependency: MTE3 must wait for V, not for the scalar pipe.
+        Sync<HardEvent::V_MTE3>(HardEvent::V_MTE3);
         DataCopyPad(evictSlotsGm[static_cast<uint64_t>(batch) * CAPACITY], output,
                     {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
-        Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+        Sync<HardEvent::MTE3_V>(HardEvent::MTE3_V);
     }
 
     __aicore__ inline void ProcessBatch(uint32_t batch)
