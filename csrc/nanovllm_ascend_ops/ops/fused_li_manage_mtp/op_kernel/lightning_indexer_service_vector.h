@@ -53,7 +53,8 @@ public:
                                                 GlobalTensor<int32_t> reqPoolEntriesGm,
                                                 GlobalTensor<int32_t> cacheSlotsGm,
                                                 GlobalTensor<int32_t> slotOutGm,
-                                                __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1);
+                                                __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1,
+                                                __gm__ uint8_t *scoreScratch, __gm__ uint8_t *thresholdScratch);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
@@ -71,6 +72,8 @@ protected:
     GlobalTensor<int32_t> slotOutGm;
     GlobalTensor<float> unionPair0Gm;
     GlobalTensor<float> unionPair1Gm;
+    GlobalTensor<float> scoreScratchGm;
+    GlobalTensor<float> thresholdScratchGm;
     // =================================常量区=================================
 
 private:
@@ -116,6 +119,7 @@ private:
 
     struct LICommon::ConstInfo constInfo_;
     uint32_t cacheSlotsSize_ = 0;
+    uint32_t scoreStride_ = 0;
 
     __aicore__ inline void PrepareChunkPayload(const LocalTensor<int32_t> &payloadLocal,
                                                uint32_t batchIdx, int32_t sourceBase,
@@ -198,6 +202,8 @@ __aicore__ inline void LIVector<LIT>::InitParams(const struct LICommon::ConstInf
     s1BaseSize_ = constInfo.s1BaseSize;
     s2BaseSize_ = constInfo.s2BaseSize;
     cacheSlotsSize_ = tilingData->cacheSlotsSize;
+    scoreStride_ = CeilDiv(constInfo.kSeqSize, static_cast<uint32_t>(s2BaseSize_)) *
+                   static_cast<uint32_t>(s2BaseSize_);
 
     // group ub 切分因子当前按照UB空间强制为16
     groupInner_ = 16;
@@ -213,7 +219,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
                                     GlobalTensor<int32_t> reqPoolEntriesGm,
                                     GlobalTensor<int32_t> cacheSlotsGm,
                                     GlobalTensor<int32_t> slotOutGm,
-                                    __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1)
+                                    __gm__ uint8_t *unionPair0, __gm__ uint8_t *unionPair1,
+                                    __gm__ uint8_t *scoreScratch, __gm__ uint8_t *thresholdScratch)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
@@ -226,6 +233,8 @@ LIVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTens
     this->slotOutGm = slotOutGm;
     this->unionPair0Gm.SetGlobalBuffer((__gm__ float *)unionPair0);
     this->unionPair1Gm.SetGlobalBuffer((__gm__ float *)unionPair1);
+    this->scoreScratchGm.SetGlobalBuffer((__gm__ float *)scoreScratch);
+    this->thresholdScratchGm.SetGlobalBuffer((__gm__ float *)thresholdScratch);
 }
 
 template <typename LIT>
@@ -532,6 +541,12 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
             if (hasLongIndexTag) {
                 TagLongIndex(sortScoreUb, cuBaseS2Idx, cuS2Len);
             }
+            uint32_t routeIndex = info.bIdx * 4U + static_cast<uint32_t>(cuS1Idx);
+            SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+            LIServiceVec::CopyOut(
+                scoreScratchGm[static_cast<uint64_t>(routeIndex) * scoreStride_ +
+                               static_cast<uint32_t>(cuBaseS2Idx)],
+                sortScoreUb, cuS2LenVecAlign);
 
             LocalTensor<float> tmpSortBuf = outQueue_.AllocTensor<float>();
             if (info.actS1Size > 4) {
@@ -579,6 +594,10 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
 
             if (needCopyOutGm) {
                 if (!constInfo_.returnValue) {
+                    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+                    thresholdScratchGm.SetValue(
+                        static_cast<uint64_t>(info.bIdx) * 4U + static_cast<uint32_t>(cuS1Idx),
+                        globalTopkUb_[innerS1Idx * BASE_TOPK * 2].GetValue((BASE_TOPK - 1U) * 2U));
                     LocalTensor<float> valueULocal = outQueue_.AllocTensor<float>();
                     SortTopkBySlotIndex(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], valueULocal,
                                         info.actS2Size > EXACT_PACKED_SOURCE_TOKENS);
@@ -842,6 +861,10 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         LocalTensor<float> outValueUb = ldOutValueBuf_.Get<float>();
         LocalTensor<uint32_t> outIdxUb = ldOutIdxBuf_.Get<uint32_t>();
         if (!constInfo_.returnValue) {
+            SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+            thresholdScratchGm.SetValue(
+                static_cast<uint64_t>(outOffset) / BASE_TOPK,
+                curValueIdxUb.GetValue((BASE_TOPK - 1U) * 2U));
             SortTopkBySlotIndex(curValueIdxUb, tmpUb,
                                 s2ActSeq > EXACT_PACKED_SOURCE_TOKENS);
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();

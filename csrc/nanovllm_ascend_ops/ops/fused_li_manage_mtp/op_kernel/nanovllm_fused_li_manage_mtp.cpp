@@ -8,6 +8,7 @@
 #include "fused_li_manage_mtp_template_tiling_key.h"
 #include "lightning_indexer_kernel.h"
 #include "fused_li_manage_mtp_union.h"
+#include "fused_li_manage_mtp_workspace.h"
 
 using namespace LIKernel;
 
@@ -18,9 +19,13 @@ using namespace LIKernel;
 #define INVOKE_LI_MTP_TOPK(...)                                                                                        \
     do {                                                                                                               \
         LI_MTP_COPY_TILING();                                                                                           \
+        __gm__ uint8_t *scoreScratch = user + MtpWorkspace::ScoreOffset(GetBlockNum());                               \
+        __gm__ uint8_t *thresholdScratch =                                                                             \
+            user + MtpWorkspace::ThresholdOffset(GetBlockNum(), tiling_data->bSize, tiling_data->s2Size);             \
         LIPreload<LIType<__VA_ARGS__, int32_t, true, LI_LAYOUT::BSND, LI_LAYOUT::PA_BSND>> op;                          \
         op.Init(query, key, weights, reqPoolEntries, cacheSlots, nullptr, actualSeqLengths, blockTable,              \
                 topkIndex, topkSlots, missSrcIds, missDstSlots,                                                       \
+                scoreScratch, thresholdScratch,                                                                       \
                 user, tiling_data, &tPipe);                                                                             \
         op.Process();                                                                                                  \
         if ASCEND_IS_AIV {                                                                                            \

@@ -314,6 +314,8 @@ ge::graphStatus FusedLiManageTiling::DoTiling(FusedLiManageTilingInfo *tilingInf
                          VALUE_AND_INDEX * DECODE_SPARSE_COUNT * sizeof(float);
         workspaceSize += static_cast<uint64_t>(blockDim) * LD_HEAD_TAIL * S1_BASE_SIZE *
                          LD_PARAM_NUM * sizeof(int64_t);
+        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * scoreStride * sizeof(float);
+        workspaceSize += static_cast<uint64_t>(tilingInfo->bSize) * sizeof(float);
     }
     constexpr uint32_t PARTIAL_SLOTS_PER_CORE = 2;
     constexpr uint32_t PARTIAL_META_INTS_PER_CORE = 8;
