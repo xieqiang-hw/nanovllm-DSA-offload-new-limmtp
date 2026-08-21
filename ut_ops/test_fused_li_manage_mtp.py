@@ -68,7 +68,8 @@ def make_case(args: argparse.Namespace) -> dict[str, torch.Tensor]:
     block_table = torch.arange(total_blocks, dtype=torch.int32, device=device).view(batch, blocks_per_request)
     candidate_lens = torch.full((batch,), args.seq_len, dtype=torch.int32, device=device)
     cache_tokens = torch.full((batch,), args.cache_tokens, dtype=torch.int32, device=device)
-    req_entries = torch.arange(batch, dtype=torch.int32, device=device)
+    req_entries_cpu = torch.arange(batch, dtype=torch.int32)
+    req_entries = req_entries_cpu.to(device)
     cache_slots = torch.full((batch, args.seq_len), -1, dtype=torch.int32, device=device)
     topk_src = torch.full((batch * MTP_WIDTH, 1, TOPK), -1, dtype=torch.int32, device=device)
     topk_dst = torch.full(topk_src.shape, -7, dtype=torch.int32, device=device)
@@ -129,7 +130,9 @@ def build_balanced_cache(case: dict[str, torch.Tensor], reference: torch.Tensor,
     reference_cpu = reference.cpu().to(torch.int64)
     union_sizes: list[int] = []
     union_miss_counts: list[int] = []
+    slot_generator = torch.Generator().manual_seed(case["args"].seed + 1701)
     for request in range(batch):
+        pool_row = int(case["req_entries_cpu"][request])
         rows = reference_cpu[request * MTP_WIDTH:(request + 1) * MTP_WIDTH]
         union = torch.unique(rows.flatten(), sorted=True)
         union_sizes.append(int(union.numel()))
@@ -184,9 +187,13 @@ def build_balanced_cache(case: dict[str, torch.Tensor], reference: torch.Tensor,
         if needed < 0 or needed > fillers.numel():
             raise AssertionError(f"request={request}: cannot construct cache budget={budget}")
         cached = torch.cat((hits, fillers[:needed]))
-        # Hits are stored before fillers, so slot 0 is guaranteed to appear in TopK.
-        slots = torch.arange(budget, dtype=torch.int32)
-        case["cache_slots"][request, cached.to(case["query"].device)] = slots.to(
+        # Match the production/reference state: logical HBM slots form a
+        # permutation and request rows are selected through req_pool_entries.
+        slots = torch.randperm(budget, generator=slot_generator).to(torch.int32)
+        if hits.numel() and int(slots[0]) != 0:
+            zero_position = int(torch.nonzero(slots == 0).item())
+            slots[zero_position], slots[0] = slots[0].clone(), slots[zero_position].clone()
+        case["cache_slots"][pool_row, cached.to(case["query"].device)] = slots.to(
             case["query"].device)
     return union_sizes, union_miss_counts
 
@@ -245,8 +252,9 @@ def expected_outputs(case: dict[str, torch.Tensor], reference: torch.Tensor
     return expected_src, expected_slots, unions
 
 
-def check_evict_slots(case: dict[str, torch.Tensor], expected_src: torch.Tensor,
-                      expected_count: int, request: int, label: str) -> None:
+def check_evict_slots(case: dict[str, torch.Tensor], old_cache: torch.Tensor,
+                      expected_src: torch.Tensor, expected_count: int,
+                      request: int, label: str) -> None:
     """Validate phase-2 slots without depending on the randomized scan order."""
     actual = case["miss_dst"][request, :expected_count].cpu().to(torch.int64)
     if expected_count == 0:
@@ -257,7 +265,8 @@ def check_evict_slots(case: dict[str, torch.Tensor], expected_src: torch.Tensor,
         return
 
     pool_row = int(case["req_entries"][request].item())
-    cache_row = case["cache_slots"][pool_row].cpu().to(torch.int64)
+    cache_row = old_cache[pool_row].cpu().to(torch.int64)
+    budget = int(case["cache_tokens"][request].item())
     route_begin = request * MTP_WIDTH
     route_end = route_begin + MTP_WIDTH
     protected = torch.unique(expected_src[route_begin:route_end].flatten()).cpu()
@@ -270,15 +279,34 @@ def check_evict_slots(case: dict[str, torch.Tensor], expected_src: torch.Tensor,
         return
     if bool((actual < 0).any()):
         raise AssertionError(f"{label}: valid eviction candidates produced negative slots")
-    if bool((actual > cache_row.max()).any()):
-        raise AssertionError(f"{label}: eviction slot is outside the cache slot range")
+    if bool((actual >= budget).any()):
+        raise AssertionError(
+            f"{label}: eviction slot is outside [0,{budget}): "
+            f"actual={actual.tolist()}")
     if torch.unique(actual).numel() != expected_count:
         raise AssertionError(f"{label}: eviction slots are not unique")
-    inverse = torch.full((int(cache_row.max().item()) + 1,), -1, dtype=torch.int64)
+    old_slots = cache_row[cached_tokens]
+    if (cached_tokens.numel() != budget or torch.unique(old_slots).numel() != budget
+            or int(old_slots.min()) != 0 or int(old_slots.max()) != budget - 1):
+        raise AssertionError(f"{label}: initial cache is not a slot permutation")
+    inverse = torch.full((budget,), -1, dtype=torch.int64)
     inverse[cache_row[cached_tokens]] = cached_tokens
     evicted_tokens = inverse[actual]
-    if bool(torch.isin(evicted_tokens, protected).any()):
-        raise AssertionError(f"{label}: selected an eviction token from a route TopK")
+    protected_mask = torch.isin(evicted_tokens, protected)
+    if bool(protected_mask.any()):
+        bad_positions = torch.nonzero(protected_mask).flatten()
+        details = []
+        route_rows = expected_src[route_begin:route_end].cpu()
+        for position in bad_positions[:8].tolist():
+            token = int(evicted_tokens[position])
+            routes = [route for route in range(MTP_WIDTH)
+                      if bool((route_rows[route] == token).any())]
+            details.append(
+                f"pos={position},slot={int(actual[position])},"
+                f"token={token},routes={routes}")
+        raise AssertionError(
+            f"{label}: selected eviction tokens from route TopK: "
+            + "; ".join(details))
 
 
 def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
@@ -307,7 +335,7 @@ def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
             raise AssertionError(
                 f"{label}: union IDs differ for request={request}, "
                 f"mismatches={int((actual != ids).sum().item())}")
-        check_evict_slots(case, expected_src, int(ids.numel()), request, label)
+        check_evict_slots(case, old_cache, expected_src, int(ids.numel()), request, label)
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError(f"{label}: cache_slots_pool was modified")
     return expected_counts
