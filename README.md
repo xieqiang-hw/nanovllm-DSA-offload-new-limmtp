@@ -130,13 +130,17 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 以及 TopK token 的 HBM hit/miss 判断。四路 query 使用同一个请求的 prefill 满块候选范围。
 `topk_src_ids` 当前保留完整 TopK source ID；`topk_dst_slots` 对 miss 写 `-1`，对 hit 写入
 合法 HBM slot（包括 slot 0）。TopK 随后按“miss 在前、hit 在后，组内 source ID 升序”
-重排。算子使用四指针合并四路有序 miss 前缀，写出升序去重的 `miss_src_ids` 和
-`miss_counts`。当前阶段暂不执行淘汰或 cache 映射更新；`miss_dst_slots` 仍保留给后续阶段。
+重排。算子使用一次四路 MrgSort 合并有序 miss 前缀，再以单指针扫描去重，写出升序的
+`miss_src_ids` 和
+`miss_counts`。随后复用非 MTP 的 512-token Sort32/MrgSort eviction 扫描，根据四路
+TopK 阈值的交集选择最多 2048 个淘汰候选，并将候选对应的 HBM slot 写入
+`miss_dst_slots`。当前阶段仍不修改 cache 映射；union miss 超过 2048 或候选不足时，
+对应的 `miss_dst_slots` 前缀写 `-1`。
 
 测试脚本会完成以下检查：
 
 - 将四路 TopK 集合与 `torch_npu.npu_lightning_indexer` 的 MTP4 输出比较；
-- 验证 `cache_slots_pool` 没有被修改；
+- 验证 eviction slot 唯一、对应的 token 不属于任一路 TopK，并且 `cache_slots_pool` 没有被修改；
 - 使用 NPU Event 分别统计标准 LightningIndexer 和 `fused_li_manage_mtp` 的平均/P50 时延；
 - 检查两者的平均时延比，默认上限为 `1.5`。
 
@@ -193,11 +197,11 @@ LI TopK、hit/miss 重排和 unique miss union：
 - 动态修改 query 内容后的 ACLGraph replay/eager 一致性；
 - 每个用例均检查 TopK、slot、重排顺序、union ID、`miss_counts` 和 cache 不变性。
 
-当前阶段尚未实现的 eviction、HBM slot 分配、`miss_dst_slots` 最终值和 cache 映射更新不在
+当前阶段尚未实现的 cache 映射更新以及 union slot 向四路 miss 的回填不在
 边界测试范围内。只运行性能回归时可传入 `--skip-boundary-tests` 跳过上述矩阵。
 
-当前测试只覆盖算子已经实现的阶段：四路 LI TopK、hit/miss 重排、unique miss union 和
-`cache_slots_pool` 保持不变。测试不会验证 eviction、HBM slot 分配或 cache 映射更新。
+当前测试覆盖四路 LI TopK、hit/miss 重排、unique miss union、最多 2048 个 eviction slot
+输出和 `cache_slots_pool` 保持不变。测试不会验证 cache 映射更新或四路 miss slot 回填。
 
 性能数据使用四路相关 query，并通过 `--perf-query-miss-count` 精确控制每一路 TopK 的 miss 数量。
 `--perf-query-noise` 控制四路 TopK 的重合程度；默认 `0.25` 时要求每个请求的 TopK union 大约为

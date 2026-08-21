@@ -40,6 +40,7 @@ public:
     {
         pair0Gm.SetGlobalBuffer((__gm__ float *)pair0);
         pair1Gm.SetGlobalBuffer((__gm__ float *)pair1);
+        evictSlotsGm.SetGlobalBuffer((__gm__ int32_t *)pair1);
         candidatesGm.SetGlobalBuffer((__gm__ int32_t *)candidates);
         cacheSlotsGm.SetGlobalBuffer((__gm__ int32_t *)cacheSlots);
         reqEntriesGm.SetGlobalBuffer((__gm__ int32_t *)reqEntries);
@@ -321,6 +322,41 @@ private:
         return accumulator.GetValue((count - 1U) * 2U) > 0.0F;
     }
 
+    // Publish the HBM slots carried by the selected eviction tokens.  The
+    // candidate pair payload is the source token index; unlike the non-MTP
+    // packed fast path, MTP keeps the full 21-bit index and resolves its slot
+    // from the shared request map only after the union candidate set is known.
+    // cache_slots is deliberately read-only in this phase.
+    __aicore__ inline void WriteEvictSlots(uint32_t batch, uint32_t count,
+                                           bool found,
+                                           LocalTensor<float> candidates,
+                                           LocalTensor<int32_t> output)
+    {
+        if (count == 0U) {
+            return;
+        }
+        Duplicate(output, -1, count);
+        Sync<HardEvent::V_S>(HardEvent::V_S);
+        if (found) {
+            uint32_t cacheRow = static_cast<uint32_t>(reqEntriesGm.GetValue(batch));
+            uint64_t cacheBase = static_cast<uint64_t>(cacheRow) * sourceCapacity;
+            LocalTensor<uint32_t> candidateBits = candidates.ReinterpretCast<uint32_t>();
+            for (uint32_t index = 0U; index < count; ++index) {
+                uint32_t evictToken = candidateBits.GetValue(index * 2U + 1U);
+                if (evictToken < sourceCapacity) {
+                    int32_t slot = cacheSlotsGm.GetValue(cacheBase + evictToken);
+                    if (slot >= 0) {
+                        output.SetValue(index, slot);
+                    }
+                }
+            }
+        }
+        Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+        DataCopyPad(evictSlotsGm[static_cast<uint64_t>(batch) * CAPACITY], output,
+                    {1, static_cast<uint16_t>(count * sizeof(int32_t)), 0, 0});
+        Sync<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+    }
+
     __aicore__ inline void ProcessBatch(uint32_t batch)
     {
         LocalTensor<float> input = pairInBuf.Get<float>();
@@ -408,14 +444,13 @@ private:
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
         DataCopyPad(countsGm[batch], countLocal,
                     {1, static_cast<uint16_t>(sizeof(int32_t)), 0, 0});
-        // Phase 2 deliberately stops at the request-level candidate
-        // accumulator. Slot decoding and all externally visible updates are
-        // added only after this path is independently validated.
-        (void)FindEvictCandidates(batch, count, input, merged);
+        bool found = FindEvictCandidates(batch, count, input, merged);
+        WriteEvictSlots(batch, count, found, merged, result);
     }
 
     GlobalTensor<float> pair0Gm;
     GlobalTensor<float> pair1Gm;
+    GlobalTensor<int32_t> evictSlotsGm;
     GlobalTensor<int32_t> candidatesGm;
     GlobalTensor<int32_t> cacheSlotsGm;
     GlobalTensor<int32_t> reqEntriesGm;

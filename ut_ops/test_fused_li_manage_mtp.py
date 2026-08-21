@@ -208,11 +208,11 @@ def run_graph_check(case: dict[str, torch.Tensor], replays: int) -> None:
         graph.replay()
         torch.npu.synchronize()
         captured = [case[name].clone() for name in
-                    ("topk_src", "topk_dst", "miss_src", "miss_counts")]
+                    ("topk_src", "topk_dst", "miss_src", "miss_dst", "miss_counts")]
         call_mtp(case)
         torch.npu.synchronize()
         eager = [case[name] for name in
-                 ("topk_src", "topk_dst", "miss_src", "miss_counts")]
+                 ("topk_src", "topk_dst", "miss_src", "miss_dst", "miss_counts")]
         if any(not torch.equal(lhs, rhs) for lhs, rhs in zip(captured, eager)):
             raise AssertionError(
                 f"ACLGraph replay outputs differ from eager outputs at replay={replay}")
@@ -245,6 +245,42 @@ def expected_outputs(case: dict[str, torch.Tensor], reference: torch.Tensor
     return expected_src, expected_slots, unions
 
 
+def check_evict_slots(case: dict[str, torch.Tensor], expected_src: torch.Tensor,
+                      expected_count: int, request: int, label: str) -> None:
+    """Validate phase-2 slots without depending on the randomized scan order."""
+    actual = case["miss_dst"][request, :expected_count].cpu().to(torch.int64)
+    if expected_count == 0:
+        return
+    if expected_count > TOPK:
+        if not bool((actual == -1).all()):
+            raise AssertionError(f"{label}: unsupported >2048 eviction must return -1")
+        return
+
+    pool_row = int(case["req_entries"][request].item())
+    cache_row = case["cache_slots"][pool_row].cpu().to(torch.int64)
+    route_begin = request * MTP_WIDTH
+    route_end = route_begin + MTP_WIDTH
+    protected = torch.unique(expected_src[route_begin:route_end].flatten()).cpu()
+    cached_tokens = torch.nonzero(cache_row >= 0, as_tuple=False).flatten()
+    eligible = cached_tokens[~torch.isin(cached_tokens, protected)]
+
+    if eligible.numel() < expected_count:
+        if not bool((actual == -1).all()):
+            raise AssertionError(f"{label}: insufficient eviction candidates must return -1")
+        return
+    if bool((actual < 0).any()):
+        raise AssertionError(f"{label}: valid eviction candidates produced negative slots")
+    if bool((actual > cache_row.max()).any()):
+        raise AssertionError(f"{label}: eviction slot is outside the cache slot range")
+    if torch.unique(actual).numel() != expected_count:
+        raise AssertionError(f"{label}: eviction slots are not unique")
+    inverse = torch.full((int(cache_row.max().item()) + 1,), -1, dtype=torch.int64)
+    inverse[cache_row[cached_tokens]] = cached_tokens
+    evicted_tokens = inverse[actual]
+    if bool(torch.isin(evicted_tokens, protected).any()):
+        raise AssertionError(f"{label}: selected an eviction token from a route TopK")
+
+
 def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
                label: str, require_slot_zero: bool = False) -> list[int]:
     expected_src, expected_slots, expected_union = expected_outputs(case, reference)
@@ -271,6 +307,7 @@ def check_case(case: dict[str, torch.Tensor], reference: torch.Tensor,
             raise AssertionError(
                 f"{label}: union IDs differ for request={request}, "
                 f"mismatches={int((actual != ids).sum().item())}")
+        check_evict_slots(case, expected_src, int(ids.numel()), request, label)
     if not torch.equal(case["cache_slots"], old_cache):
         raise AssertionError(f"{label}: cache_slots_pool was modified")
     return expected_counts
@@ -292,7 +329,13 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
         ("fp16_one_miss", dict(seq_len=8192, cache_tokens=8064, dtype="fp16",
                                perf_query_miss_count=1), "balanced"),
         ("partial_budget", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
-                                perf_query_miss_count=64), "balanced"),
+                                 perf_query_miss_count=64), "balanced"),
+        ("identical_512_miss", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+                                    perf_query_miss_count=512), "balanced"),
+        ("identical_513_miss", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+                                    perf_query_miss_count=513), "balanced"),
+        ("identical_2048_miss", dict(seq_len=8192, cache_tokens=6144, dtype="bf16",
+                                     perf_query_miss_count=2048), "balanced"),
         ("all_miss", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
                           perf_query_noise=2.0), "all_miss"),
         ("identical_routes", dict(seq_len=8192, cache_tokens=8192, dtype="bf16",
@@ -305,7 +348,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
         print(f"FUSED_LI_MANAGE_MTP_BOUNDARY_BEGIN case={label}", flush=True)
         edge_args = boundary_args(args, seed=args.seed + 100 + index, **overrides)
         case = make_case(edge_args)
-        if label == "identical_routes":
+        if label == "identical_routes" or label.startswith("identical_"):
             case["query"].copy_(case["query"][0:1].expand_as(case["query"]))
         if label == "union_capacity":
             # Give each route an exclusive 2048-token score band. The four
@@ -331,8 +374,10 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
             case["cache_slots"][0, :edge_args.seq_len] = torch.arange(
                 edge_args.seq_len, dtype=torch.int32, device=case["query"].device)
         # all_miss deliberately retains the initial -1 persistent map.
-        counts = check_case(case, reference, label,
-                            require_slot_zero=cache_mode != "all_miss")
+        counts = check_case(
+            case, reference, label,
+            require_slot_zero=(cache_mode != "all_miss" and
+                               edge_args.perf_query_miss_count < TOPK))
         if label == "identical_routes" and counts != [TOPK]:
             raise AssertionError(f"{label}: expected union={TOPK}, actual={counts}")
         if label == "union_capacity" and counts != [UNION_CAPACITY]:
