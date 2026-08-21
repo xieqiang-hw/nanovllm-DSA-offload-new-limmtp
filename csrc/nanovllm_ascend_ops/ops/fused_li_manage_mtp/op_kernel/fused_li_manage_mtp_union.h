@@ -371,6 +371,8 @@ private:
         if (found) {
             uint32_t actual = static_cast<uint32_t>(candidatesGm.GetValue(batch));
             uint32_t cacheTokenCount = static_cast<uint32_t>(cacheTokensGm.GetValue(batch));
+            uint32_t cacheRow = static_cast<uint32_t>(reqEntriesGm.GetValue(batch));
+            uint64_t cacheRowBase = static_cast<uint64_t>(cacheRow) * sourceCapacity;
             uint32_t candidateCap =
                 ((count + EVICT_CHUNK - 1U) / EVICT_CHUNK) * EVICT_CHUNK;
             bool hasLongIndexTag = actual > INDEX_MASK + 1U;
@@ -392,6 +394,13 @@ private:
                 int32_t slot = static_cast<int32_t>(payload >> INDEX_BITS);
                 if (sourceIndex >= actual || slot < 0 ||
                     static_cast<uint32_t>(slot) >= cacheTokenCount) {
+                    continue;
+                }
+                // Sort32/MrgSort must carry the packed slot and source index
+                // as one payload.  Re-read the persistent map before trusting
+                // the pair so a key/payload or payload-field mismatch cannot
+                // evict a different token from the one validated below.
+                if (cacheSlotsGm.GetValue(cacheRowBase + sourceIndex) != slot) {
                     continue;
                 }
                 bool belowAllThresholds = true;
