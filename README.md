@@ -134,7 +134,9 @@ python3 ut_ops/test_fused_li_manage_perf.py --help
 `miss_src_ids` 和
 `miss_counts`。随后复用非 MTP 的 512-token Sort32/MrgSort eviction 扫描，根据四路
 TopK 阈值的交集选择最多 2048 个淘汰候选，并将候选对应的 HBM slot 写入
-`miss_dst_slots`。当前阶段仍不修改 cache 映射；union miss 超过 2048 或候选不足时，
+`miss_dst_slots`。eviction 候选与非 MTP 使用相同的 packed payload：高 14 位保存 HBM
+slot、低 18 位保存 source index，长序列 index 的高 3 位保存在排序 key 的低位，因此
+输出 slot 时不需要再次随机读取 `cache_slots`。当前阶段仍不修改 cache 映射；union miss超过 2048 或候选不足时，
 对应的 `miss_dst_slots` 前缀写 `-1`。
 
 测试脚本会完成以下检查：

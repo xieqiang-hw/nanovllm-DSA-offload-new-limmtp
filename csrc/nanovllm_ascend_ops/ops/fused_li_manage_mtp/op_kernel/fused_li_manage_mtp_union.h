@@ -12,6 +12,10 @@ constexpr uint32_t PAIR_WORDS = 4096U;
 constexpr uint32_t CAPACITY = 8192U;
 constexpr uint32_t SHORT_MASK = (1U << 18U) - 1U;
 constexpr uint32_t LONG_MASK = (1U << 21U) - 1U;
+constexpr uint32_t INDEX_BITS = 18U;
+constexpr uint32_t INDEX_MASK = (1U << INDEX_BITS) - 1U;
+constexpr uint32_t INDEX_HIGH_BITS = 3U;
+constexpr uint32_t SCORE_TAG_CLEAR_SHIFT = INDEX_HIGH_BITS;
 constexpr uint32_t MISS_KEY_BASE_BITS = 0x40000000U;
 constexpr uint32_t EVICT_CHUNK = 512U;
 constexpr uint32_t EVICT_SORT_REPEATS = EVICT_CHUNK / 32U;
@@ -120,7 +124,8 @@ private:
 
     __aicore__ inline void BuildEvictCandidateChunk(
         uint32_t batch, uint32_t cacheRow, uint32_t start, uint32_t valid,
-        LocalTensor<float> chunkPair, LocalTensor<float> scratch)
+        bool hasLongIndexTag, LocalTensor<float> chunkPair,
+        LocalTensor<float> scratch)
     {
         LocalTensor<float> score0 = scratch;
         LocalTensor<float> score1 = scratch[EVICT_CHUNK];
@@ -175,9 +180,21 @@ private:
         Muls(key, key, -1.0F, valid);
         PipeBarrier<PIPE_V>();
 
-        Duplicate(invalidKey.ReinterpretCast<int32_t>(), NEG_INF_BITS, EVICT_CHUNK);
-        PipeBarrier<PIPE_V>();
         CompareScalar(invalidMask, key, 0.0F, CMPMODE::LE, valid);
+        PipeBarrier<PIPE_V>();
+        if (hasLongIndexTag) {
+            ShiftRight(key.ReinterpretCast<uint32_t>(), key.ReinterpretCast<uint32_t>(),
+                       SCORE_TAG_CLEAR_SHIFT, valid);
+            PipeBarrier<PIPE_V>();
+            ShiftLeft(key.ReinterpretCast<uint32_t>(), key.ReinterpretCast<uint32_t>(),
+                      SCORE_TAG_CLEAR_SHIFT, valid);
+            PipeBarrier<PIPE_V>();
+            Adds(key.ReinterpretCast<int32_t>(), key.ReinterpretCast<int32_t>(),
+                 static_cast<int32_t>((start >> INDEX_BITS) &
+                                      ((1U << INDEX_HIGH_BITS) - 1U)), valid);
+            PipeBarrier<PIPE_V>();
+        }
+        Duplicate(invalidKey.ReinterpretCast<int32_t>(), NEG_INF_BITS, EVICT_CHUNK);
         PipeBarrier<PIPE_V>();
         Select(key, invalidMask, invalidKey, key,
                SELMODE::VSEL_TENSOR_TENSOR_MODE, valid);
@@ -187,8 +204,18 @@ private:
         Select(key, invalidMask, invalidKey, key,
                SELMODE::VSEL_TENSOR_TENSOR_MODE, valid);
         PipeBarrier<PIPE_V>();
+        // Match the non-MTP eviction codec: slot14 occupies the upper bits,
+        // index_low18 occupies the payload low bits, and index_high3 is kept
+        // in the score key's low three bits for long source sequences.
         ArithProgression<int32_t>(payload.ReinterpretCast<int32_t>(),
-                                  static_cast<int32_t>(start), 1, EVICT_CHUNK);
+                                  static_cast<int32_t>(start & INDEX_MASK), 1,
+                                  EVICT_CHUNK);
+        PipeBarrier<PIPE_V>();
+        ShiftLeft(slots.ReinterpretCast<uint32_t>(), slots.ReinterpretCast<uint32_t>(),
+                  INDEX_BITS, valid);
+        PipeBarrier<PIPE_V>();
+        Add(payload.ReinterpretCast<int32_t>(), payload.ReinterpretCast<int32_t>(),
+            slots, valid);
         PipeBarrier<PIPE_V>();
         if (valid < EVICT_CHUNK) {
             Duplicate(key.ReinterpretCast<int32_t>()[valid], NEG_INF_BITS,
@@ -238,6 +265,7 @@ private:
         }
         uint32_t startChunk = HashEvictScanSeed(actual, cacheRow) % chunks;
         uint32_t stopScan = chunks;
+        bool hasLongIndexTag = actual > INDEX_MASK + 1U;
 
         if (candidateCap == EVICT_CHUNK) {
             // Same four-chunk batching used by the non-MTP 512 fast path.
@@ -258,6 +286,7 @@ private:
                                          ? actual - start
                                          : EVICT_CHUNK;
                     BuildEvictCandidateChunk(batch, cacheRow, start, valid,
+                                             hasLongIndexTag,
                                              chunkBlocks[item * EVICT_CHUNK * 2U],
                                              scratch);
                 }
@@ -299,6 +328,7 @@ private:
                                      ? actual - start
                                      : EVICT_CHUNK;
                 BuildEvictCandidateChunk(batch, cacheRow, start, valid,
+                                         hasLongIndexTag,
                                          chunkPair, scratch);
                 MergeEvictCandidateChunk(accumulator, chunkPair,
                                          candidateCap, mergeTmp);
@@ -322,11 +352,8 @@ private:
         return accumulator.GetValue((count - 1U) * 2U) > 0.0F;
     }
 
-    // Publish the HBM slots carried by the selected eviction tokens.  The
-    // candidate pair payload is the source token index; unlike the non-MTP
-    // packed fast path, MTP keeps the full 21-bit index and resolves its slot
-    // from the shared request map only after the union candidate set is known.
-    // cache_slots is deliberately read-only in this phase.
+    // Decode HBM slots directly from the same slot14/index_low18 payload used
+    // by the non-MTP packed fast path. cache_slots remains read-only here.
     __aicore__ inline void WriteEvictSlots(uint32_t batch, uint32_t count,
                                            bool found,
                                            LocalTensor<float> candidates,
@@ -336,20 +363,12 @@ private:
             return;
         }
         Duplicate(output, -1, count);
-        Sync<HardEvent::V_S>(HardEvent::V_S);
         if (found) {
-            uint32_t cacheRow = static_cast<uint32_t>(reqEntriesGm.GetValue(batch));
-            uint64_t cacheBase = static_cast<uint64_t>(cacheRow) * sourceCapacity;
-            LocalTensor<uint32_t> candidateBits = candidates.ReinterpretCast<uint32_t>();
-            for (uint32_t index = 0U; index < count; ++index) {
-                uint32_t evictToken = candidateBits.GetValue(index * 2U + 1U);
-                if (evictToken < sourceCapacity) {
-                    int32_t slot = cacheSlotsGm.GetValue(cacheBase + evictToken);
-                    if (slot >= 0) {
-                        output.SetValue(index, slot);
-                    }
-                }
-            }
+            LIServiceVec::ExtractIndex(output.ReinterpretCast<uint32_t>(),
+                                       candidates.ReinterpretCast<uint32_t>(), count);
+            ShiftRight(output.ReinterpretCast<uint32_t>(), output.ReinterpretCast<uint32_t>(),
+                       INDEX_BITS, count);
+            PipeBarrier<PIPE_V>();
         }
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
         DataCopyPad(evictSlotsGm[static_cast<uint64_t>(batch) * CAPACITY], output,

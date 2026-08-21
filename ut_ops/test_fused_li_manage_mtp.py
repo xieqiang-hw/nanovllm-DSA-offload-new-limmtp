@@ -321,6 +321,35 @@ def boundary_args(base: argparse.Namespace, **overrides) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
+def validate_evict_payload_codec() -> None:
+    """Keep the MTP eviction payload bit-compatible with the non-MTP codec."""
+    indices = torch.tensor(
+        [0, 1, (1 << 18) - 1, 1 << 18, (3 << 18) + 17,
+         (7 << 18) - 1, (7 << 18) + 9, (1 << 21) - 1],
+        dtype=torch.int64,
+    )
+    slots = torch.tensor([0, 1, 6143, 12287, 16382, 7, 99, 2047],
+                         dtype=torch.int64)
+    low18 = indices & ((1 << 18) - 1)
+    high3 = indices >> 18
+    payloads = (slots << 18) | low18
+    key_values = torch.tensor(
+        [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0],
+        dtype=torch.float32,
+    )
+    key_bits = key_values.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    tagged_key_bits = (key_bits & ~0x7) | high3
+    decoded_indices = (payloads & ((1 << 18) - 1)) | ((tagged_key_bits & 0x7) << 18)
+    decoded_slots = payloads >> 18
+    if not torch.equal(decoded_indices, indices) or not torch.equal(decoded_slots, slots):
+        raise AssertionError("The MTP packed eviction-candidate codec is not reversible")
+    print(
+        "FUSED_LI_MANAGE_MTP_EVICT_CODEC_CHECK "
+        "payload=slot14_indexlow18 key_tag=indexhigh3 ok=1",
+        flush=True,
+    )
+
+
 def run_boundary_tests(args: argparse.Namespace) -> None:
     """Correctness-only coverage for semantics implemented through miss union."""
     cases = (
@@ -407,6 +436,7 @@ def run_boundary_tests(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    validate_evict_payload_codec()
     require_local_opapi()
     if not callable(getattr(torch_npu, "npu_lightning_indexer", None)):
         raise RuntimeError("torch_npu.npu_lightning_indexer is unavailable")
