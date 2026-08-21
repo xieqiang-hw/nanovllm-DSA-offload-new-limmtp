@@ -15,6 +15,9 @@ constexpr uint32_t LONG_MASK = (1U << 21U) - 1U;
 constexpr uint32_t MISS_KEY_BASE_BITS = 0x40000000U;
 constexpr uint32_t EVICT_CHUNK = 512U;
 constexpr uint32_t EVICT_SORT_REPEATS = EVICT_CHUNK / 32U;
+constexpr uint32_t EVICT_CAPACITY = 2048U;
+constexpr uint32_t EVICT_EXTRA_SCAN_CHUNKS = 4U;
+constexpr uint32_t THRESHOLD_STRIDE = 8U;
 constexpr int32_t NEG_INF_BITS = static_cast<int32_t>(0xFF800000U);
 
 template <HardEvent event>
@@ -60,6 +63,17 @@ public:
     }
 
 private:
+    __aicore__ inline uint32_t HashEvictScanSeed(uint32_t actual, uint32_t cacheRow)
+    {
+        uint32_t value = actual ^ ((cacheRow + 1U) * 0x9e3779b9U);
+        value ^= value >> 16U;
+        value *= 0x7feb352dU;
+        value ^= value >> 15U;
+        value *= 0x846ca68bU;
+        value ^= value >> 16U;
+        return value;
+    }
+
     // This is the MTP extension of non-MTP SortEvictCandidateChunk.  It keeps
     // the same 512-entry Sort32/MrgSort pair representation; only construction
     // of the key changes from one score threshold to the intersection of four.
@@ -139,17 +153,21 @@ private:
 
         // margin=max_r(score_r-threshold_r). A candidate is valid only when
         // it is cached and margin<0, i.e. below every route's TopK threshold.
-        Adds(key, score0, -thresholdScratchGm.GetValue(batch * ROUTES), valid);
+        Adds(key, score0,
+             -thresholdScratchGm.GetValue(batch * ROUTES * THRESHOLD_STRIDE), valid);
         PipeBarrier<PIPE_V>();
-        Adds(temp, score1, -thresholdScratchGm.GetValue(batch * ROUTES + 1U), valid);
-        PipeBarrier<PIPE_V>();
-        Max(key, key, temp, valid);
-        PipeBarrier<PIPE_V>();
-        Adds(temp, score2, -thresholdScratchGm.GetValue(batch * ROUTES + 2U), valid);
+        Adds(temp, score1,
+             -thresholdScratchGm.GetValue((batch * ROUTES + 1U) * THRESHOLD_STRIDE), valid);
         PipeBarrier<PIPE_V>();
         Max(key, key, temp, valid);
         PipeBarrier<PIPE_V>();
-        Adds(temp, score3, -thresholdScratchGm.GetValue(batch * ROUTES + 3U), valid);
+        Adds(temp, score2,
+             -thresholdScratchGm.GetValue((batch * ROUTES + 2U) * THRESHOLD_STRIDE), valid);
+        PipeBarrier<PIPE_V>();
+        Max(key, key, temp, valid);
+        PipeBarrier<PIPE_V>();
+        Adds(temp, score3,
+             -thresholdScratchGm.GetValue((batch * ROUTES + 3U) * THRESHOLD_STRIDE), valid);
         PipeBarrier<PIPE_V>();
         Max(key, key, temp, valid);
         PipeBarrier<PIPE_V>();
@@ -177,6 +195,130 @@ private:
             PipeBarrier<PIPE_V>();
         }
         SortEvictChunk(chunkPair, key, payload, sortTmp);
+    }
+
+    __aicore__ inline void MergeEvictCandidateChunk(
+        LocalTensor<float> accumulator, LocalTensor<float> chunkPair,
+        uint32_t candidateCap, LocalTensor<float> tmp)
+    {
+        uint32_t candidateBlocks = candidateCap / EVICT_CHUNK;
+        if (candidateBlocks == 2U || candidateBlocks == 3U) {
+            LIServiceVec::MrgBasicBlock(tmp, accumulator,
+                                        static_cast<int64_t>(candidateBlocks + 1U),
+                                        EVICT_CHUNK);
+            PipeBarrier<PIPE_V>();
+            DataCopy(accumulator, tmp, candidateCap * 2U);
+            PipeBarrier<PIPE_V>();
+            return;
+        }
+        LIServiceVec::MergeSort(accumulator, static_cast<int32_t>(candidateCap),
+                                chunkPair, EVICT_CHUNK, tmp);
+    }
+
+    __aicore__ inline bool FindEvictCandidates(uint32_t batch, uint32_t count,
+                                                LocalTensor<float> input,
+                                                LocalTensor<float> merged)
+    {
+        if (count == 0U || count > EVICT_CAPACITY) {
+            return count == 0U;
+        }
+        uint32_t candidateCap =
+            ((count + EVICT_CHUNK - 1U) / EVICT_CHUNK) * EVICT_CHUNK;
+        LocalTensor<float> accumulator = merged;
+        Duplicate(accumulator.ReinterpretCast<int32_t>(), NEG_INF_BITS,
+                  candidateCap * 2U);
+        PipeBarrier<PIPE_V>();
+
+        uint32_t actual = static_cast<uint32_t>(candidatesGm.GetValue(batch));
+        uint32_t cacheRow = static_cast<uint32_t>(reqEntriesGm.GetValue(batch));
+        uint32_t chunks = (actual + EVICT_CHUNK - 1U) / EVICT_CHUNK;
+        if (chunks == 0U) {
+            return false;
+        }
+        uint32_t startChunk = HashEvictScanSeed(actual, cacheRow) % chunks;
+        uint32_t stopScan = chunks;
+
+        if (candidateCap == EVICT_CHUNK) {
+            // Same four-chunk batching used by the non-MTP 512 fast path.
+            LocalTensor<float> chunkBlocks = input;
+            LocalTensor<float> scratch = input[EVICT_CHUNK * 8U];
+            LocalTensor<float> batchMerged = input[EVICT_CHUNK * 20U];
+            LocalTensor<float> mergeTmp = input[EVICT_CHUNK * 28U];
+            uint32_t scan = 0U;
+            while (scan < chunks) {
+                uint32_t batchChunks = chunks - scan < 4U ? chunks - scan : 4U;
+                if (stopScan != chunks && batchChunks > stopScan - scan) {
+                    batchChunks = stopScan - scan;
+                }
+                for (uint32_t item = 0U; item < batchChunks; ++item) {
+                    uint32_t chunk = (startChunk + scan + item) % chunks;
+                    uint32_t start = chunk * EVICT_CHUNK;
+                    uint32_t valid = start + EVICT_CHUNK > actual
+                                         ? actual - start
+                                         : EVICT_CHUNK;
+                    BuildEvictCandidateChunk(batch, cacheRow, start, valid,
+                                             chunkBlocks[item * EVICT_CHUNK * 2U],
+                                             scratch);
+                }
+                if (batchChunks == 1U) {
+                    LIServiceVec::MergeSort(accumulator, EVICT_CHUNK, chunkBlocks,
+                                            EVICT_CHUNK, mergeTmp);
+                } else {
+                    LIServiceVec::MrgBasicBlock(batchMerged, chunkBlocks,
+                                                static_cast<int64_t>(batchChunks),
+                                                EVICT_CHUNK);
+                    PipeBarrier<PIPE_V>();
+                    LIServiceVec::MergeSort(accumulator, EVICT_CHUNK, batchMerged,
+                                            EVICT_CHUNK, mergeTmp);
+                }
+                scan += batchChunks;
+                Sync<HardEvent::V_S>(HardEvent::V_S);
+                if (stopScan == chunks &&
+                    accumulator.GetValue((count - 1U) * 2U) > 0.0F) {
+                    uint32_t remaining = chunks - scan;
+                    uint32_t extra = remaining < EVICT_EXTRA_SCAN_CHUNKS
+                                         ? remaining
+                                         : EVICT_EXTRA_SCAN_CHUNKS;
+                    if (extra == 0U) {
+                        break;
+                    }
+                    stopScan = scan + extra;
+                } else if (stopScan != chunks && scan >= stopScan) {
+                    break;
+                }
+            }
+        } else {
+            LocalTensor<float> scratch = input;
+            LocalTensor<float> mergeTmp = input[EVICT_CHUNK * 12U];
+            LocalTensor<float> chunkPair = accumulator[candidateCap * 2U];
+            for (uint32_t scan = 0U; scan < chunks; ++scan) {
+                uint32_t chunk = (startChunk + scan) % chunks;
+                uint32_t start = chunk * EVICT_CHUNK;
+                uint32_t valid = start + EVICT_CHUNK > actual
+                                     ? actual - start
+                                     : EVICT_CHUNK;
+                BuildEvictCandidateChunk(batch, cacheRow, start, valid,
+                                         chunkPair, scratch);
+                MergeEvictCandidateChunk(accumulator, chunkPair,
+                                         candidateCap, mergeTmp);
+                Sync<HardEvent::V_S>(HardEvent::V_S);
+                if (stopScan == chunks &&
+                    accumulator.GetValue((count - 1U) * 2U) > 0.0F) {
+                    uint32_t remaining = chunks - scan - 1U;
+                    uint32_t extra = remaining < EVICT_EXTRA_SCAN_CHUNKS
+                                         ? remaining
+                                         : EVICT_EXTRA_SCAN_CHUNKS;
+                    if (extra == 0U) {
+                        break;
+                    }
+                    stopScan = scan + 1U + extra;
+                } else if (stopScan != chunks && scan + 1U >= stopScan) {
+                    break;
+                }
+            }
+        }
+        Sync<HardEvent::V_S>(HardEvent::V_S);
+        return accumulator.GetValue((count - 1U) * 2U) > 0.0F;
     }
 
     __aicore__ inline void ProcessBatch(uint32_t batch)
@@ -266,6 +408,10 @@ private:
         Sync<HardEvent::S_MTE3>(HardEvent::S_MTE3);
         DataCopyPad(countsGm[batch], countLocal,
                     {1, static_cast<uint16_t>(sizeof(int32_t)), 0, 0});
+        // Phase 2 deliberately stops at the request-level candidate
+        // accumulator. Slot decoding and all externally visible updates are
+        // added only after this path is independently validated.
+        (void)FindEvictCandidates(batch, count, input, merged);
     }
 
     GlobalTensor<float> pair0Gm;

@@ -14,6 +14,7 @@ constexpr uint64_t VALUE_AND_INDEX = 2U;
 constexpr uint64_t TOPK = 2048U;
 constexpr uint64_t LD_PARAM_NUM = 16U;
 constexpr uint64_t ROUTES = 4U;
+constexpr uint64_t THRESHOLD_STRIDE = 8U;
 
 __aicore__ inline uint64_t ScoreStride(uint64_t sourceCapacity)
 {

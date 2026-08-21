@@ -596,7 +596,7 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                 if (!constInfo_.returnValue) {
                     SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
                     thresholdScratchGm.SetValue(
-                        static_cast<uint64_t>(info.bIdx) * 4U + static_cast<uint32_t>(cuS1Idx),
+                        (static_cast<uint64_t>(info.bIdx) * 4U + static_cast<uint32_t>(cuS1Idx)) * 8U,
                         globalTopkUb_[innerS1Idx * BASE_TOPK * 2].GetValue((BASE_TOPK - 1U) * 2U));
                     LocalTensor<float> valueULocal = outQueue_.AllocTensor<float>();
                     SortTopkBySlotIndex(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], valueULocal,
@@ -863,7 +863,7 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         if (!constInfo_.returnValue) {
             SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
             thresholdScratchGm.SetValue(
-                static_cast<uint64_t>(outOffset) / BASE_TOPK,
+                (static_cast<uint64_t>(outOffset) / BASE_TOPK) * 8U,
                 curValueIdxUb.GetValue((BASE_TOPK - 1U) * 2U));
             SortTopkBySlotIndex(curValueIdxUb, tmpUb,
                                 s2ActSeq > EXACT_PACKED_SOURCE_TOKENS);
