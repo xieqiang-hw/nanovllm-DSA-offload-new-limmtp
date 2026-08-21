@@ -547,6 +547,10 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                 scoreScratchGm[static_cast<uint64_t>(routeIndex) * scoreStride_ +
                                static_cast<uint32_t>(cuBaseS2Idx)],
                 sortScoreUb, cuS2LenVecAlign);
+            // Two MTP routes on the same AIV reuse reduceOutBuff.  Finish the
+            // score copy before the next inner-S1 iteration overwrites that
+            // UB, matching the lifetime guarantee in the non-MTP path.
+            SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
 
             LocalTensor<float> tmpSortBuf = outQueue_.AllocTensor<float>();
             if (info.actS1Size > 4) {
